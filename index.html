@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Personnel Agent — Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3e;
+      --accent: #6366f1;
+      --accent2: #10b981;
+      --accent3: #f59e0b;
+      --danger: #ef4444;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --radius: 12px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 20px 32px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .logo {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    header h1 {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .badge {
+      margin-left: auto;
+      background: var(--accent2);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent2);
+      box-shadow: 0 0 8px var(--accent2);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    main {
+      padding: 32px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* KPI CARDS */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .kpi-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .kpi-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--accent);
+    }
+
+    .kpi-card.green::before  { background: var(--accent2); }
+    .kpi-card.amber::before  { background: var(--accent3); }
+    .kpi-card.red::before    { background: var(--danger); }
+    .kpi-card.purple::before { background: var(--accent); }
+
+    .kpi-label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+
+    .kpi-value {
+      font-size: 36px;
+      font-weight: 700;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+
+    .kpi-sub {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .kpi-icon {
+      position: absolute;
+      top: 20px; right: 20px;
+      font-size: 24px;
+      opacity: 0.3;
+    }
+
+    /* CHARTS */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+      gap: 24px;
+      margin-bottom: 32px;
+    }
+
+    .chart-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+    }
+
+    .chart-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: var(--text);
+    }
+
+    .chart-container {
+      position: relative;
+      height: 220px;
+    }
+
+    /* TABLES */
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .section-title span {
+      font-size: 12px;
+      background: var(--border);
+      padding: 2px 8px;
+      border-radius: 20px;
+      color: var(--muted);
+    }
+
+    .table-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    thead {
+      background: rgba(255,255,255,0.03);
+    }
+
+    th {
+      text-align: left;
+      padding: 12px 16px;
+      font-weight: 500;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background: rgba(255,255,255,0.02);
+    }
+
+    .risk-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .risk-low      { background: rgba(16,185,129,.15); color: #10b981; }
+    .risk-medium   { background: rgba(245,158,11,.15); color: #f59e0b; }
+    .risk-high     { background: rgba(239,68,68,.15); color: #ef4444; }
+    .risk-critical { background: rgba(239,68,68,.25); color: #f87171; }
+
+    .tier-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .tier-auto     { background: rgba(16,185,129,.15); color: #10b981; }
+    .tier-approval { background: rgba(245,158,11,.15); color: #f59e0b; }
+    .tier-blocked  { background: rgba(99,102,241,.15); color: #a5b4fc; }
+
+    .agent-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      background: rgba(99,102,241,.15);
+      color: #a5b4fc;
+    }
+
+    /* APPROVAL QUEUE */
+    .approval-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .approval-card.urgent {
+      border-color: var(--danger);
+    }
+
+    .approval-info { flex: 1; }
+    .approval-action { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+    .approval-meta { font-size: 12px; color: var(--muted); }
+
+    .btn {
+      padding: 6px 14px;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .btn:hover { opacity: 0.8; }
+    .btn-approve { background: var(--accent2); color: white; }
+    .btn-reject  { background: rgba(239,68,68,0.2); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+
+    /* REFRESH */
+    .refresh-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .refresh-bar button {
+      background: var(--border);
+      border: none;
+      color: var(--text);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    /* CONFIG */
+    .config-section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+
+    .config-section label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    .config-section input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 6px;
+      width: 100%;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+
+    .config-section input:focus {
+      outline: 2px solid var(--accent);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">P</div>
+  <h1>Personnel Agent Dashboard</h1>
+  <div class="status-dot"></div>
+  <small style="color: var(--muted); font-size: 12px;">Live</small>
+  <span class="badge">v1.0</span>
+</header>
+
+<main>
+
+  <!-- Config (hidden in prod) -->
+  <details style="margin-bottom: 20px;">
+    <summary style="cursor: pointer; font-size: 13px; color: var(--muted);">Dashboard Configuration</summary>
+    <div class="config-section" style="margin-top: 12px;">
+      <label>FastAPI Base URL</label>
+      <input type="text" id="api-url" value="http://localhost:8000" placeholder="http://localhost:8000" />
+      <label>API Token</label>
+      <input type="password" id="api-token" value="" placeholder="your-api-token" />
+      <button class="btn btn-approve" onclick="loadDashboard()">Connect &amp; Refresh</button>
+    </div>
+  </details>
+
+  <!-- Refresh bar -->
+  <div class="refresh-bar">
+    <span id="last-updated">Last updated: —</span>
+    <button onclick="loadDashboard()">Refresh</button>
+    <button onclick="toggleAutoRefresh()">Auto-refresh: <span id="auto-refresh-label">OFF</span></button>
+  </div>
+
+  <!-- KPIs -->
+  <div class="kpi-grid" id="kpi-grid">
+    <div class="kpi-card purple">
+      <div class="kpi-icon">👥</div>
+      <div class="kpi-label">Total People</div>
+      <div class="kpi-value" id="kpi-people">—</div>
+      <div class="kpi-sub">in relationship graph</div>
+    </div>
+    <div class="kpi-card green">
+      <div class="kpi-icon">⚡</div>
+      <div class="kpi-label">Actions Today</div>
+      <div class="kpi-value" id="kpi-actions">—</div>
+      <div class="kpi-sub">auto-executed</div>
+    </div>
+    <div class="kpi-card amber">
+      <div class="kpi-icon">⏳</div>
+      <div class="kpi-label">Pending Approvals</div>
+      <div class="kpi-value" id="kpi-approvals">—</div>
+      <div class="kpi-sub">awaiting review</div>
+    </div>
+    <div class="kpi-card red">
+      <div class="kpi-icon">🎯</div>
+      <div class="kpi-label">Open Roles</div>
+      <div class="kpi-value" id="kpi-roles">—</div>
+      <div class="kpi-sub">recruiting active</div>
+    </div>
+    <div class="kpi-card purple">
+      <div class="kpi-icon">🌡️</div>
+      <div class="kpi-label">Cold Contacts</div>
+      <div class="kpi-value" id="kpi-cold">—</div>
+      <div class="kpi-sub">14+ days no contact</div>
+    </div>
+    <div class="kpi-card green">
+      <div class="kpi-icon">✅</div>
+      <div class="kpi-label">Agent Confidence</div>
+      <div class="kpi-value" id="kpi-confidence">—</div>
+      <div class="kpi-sub">avg this week</div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-title">Agent Activity — Last 7 Days</div>
+      <div class="chart-container">
+        <canvas id="chart-activity"></canvas>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Action Tier Distribution</div>
+      <div class="chart-container">
+        <canvas id="chart-tiers"></canvas>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Candidate Pipeline by Stage</div>
+      <div class="chart-container">
+        <canvas id="chart-pipeline"></canvas>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Risk Level Distribution (30d)</div>
+      <div class="chart-container">
+        <canvas id="chart-risk"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pending Approvals -->
+  <div class="section-title">
+    Pending Approvals <span id="approval-count">0</span>
+  </div>
+  <div id="approvals-container">
+    <div style="color: var(--muted); font-size: 13px; padding: 16px 0;">
+      Loading approvals...
+    </div>
+  </div>
+
+  <!-- Recent Agent Actions -->
+  <div class="section-title" style="margin-top: 32px;">
+    Recent Agent Actions <span>Last 50</span>
+  </div>
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Agent</th>
+          <th>Action</th>
+          <th>Tier</th>
+          <th>Risk</th>
+          <th>Confidence</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody id="audit-table-body">
+        <tr>
+          <td colspan="7" style="text-align:center; color: var(--muted); padding: 32px;">
+            No data yet. Connect your database or run the agent to see activity.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Cold Contacts Table -->
+  <div class="section-title" style="margin-top: 32px;">
+    Cold Relationships <span>Priority contacts needing follow-up</span>
+  </div>
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Priority</th>
+          <th>Days Cold</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="cold-table-body">
+        <tr>
+          <td colspan="6" style="text-align:center; color: var(--muted); padding: 32px;">
+            No cold contacts loaded.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<script>
+  // ============================================================
+  // CONFIG
+  // ============================================================
+  let API_URL = '';
+  let API_TOKEN = '';
+  let autoRefreshInterval = null;
+  let charts = {};
+
+  function getConfig() {
+    API_URL   = document.getElementById('api-url').value.trim().replace(/\/$/, '');
+    API_TOKEN = document.getElementById('api-token').value.trim();
+  }
+
+  // ============================================================
+  // API FETCH HELPER
+  // ============================================================
+  async function apiFetch(endpoint, options = {}) {
+    getConfig();
+    if (!API_URL || !API_TOKEN) return null;
+    try {
+      const res = await fetch(`${API_URL}${endpoint}`, {
+        ...options,
+        headers: {
+          'x-api-token': API_TOKEN,
+          'Content-Type': 'application/json',
+          ...(options.headers || {}),
+        },
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+
+  // ============================================================
+  // MOCK DATA (when API not connected)
+  // ============================================================
+  function getMockData() {
+    return {
+      kpis: {
+        people: 147,
+        actions_today: 38,
+        pending_approvals: 4,
+        open_roles: 3,
+        cold_contacts: 12,
+        avg_confidence: '0.84'
+      },
+      activity: {
+        labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+        talent:      [8,  12, 5,  15, 9,  2,  4],
+        scheduling:  [14, 9,  12, 8,  16, 3,  6],
+        onboarding:  [3,  4,  7,  3,  5,  1,  2],
+        performance: [6,  8,  4,  11, 7,  0,  3],
+        knowledge:   [11, 7,  9,  6,  12, 4,  5],
+      },
+      tiers: { auto_execute: 72, needs_approval: 22, blocked: 6 },
+      pipeline: {
+        labels: ['Sourced', 'Outreach', 'Responded', 'Screened', 'Interview', 'Offer', 'Hired'],
+        data:   [24, 18, 9, 6, 4, 2, 1]
+      },
+      risk: { low: 68, medium: 21, high: 8, critical: 3 },
+      approvals: [
+        { id: 'ap-001', action_type: 'send_outreach_email', agent_name: 'talent', person_name: 'Alex Chen', reasoning: 'Strong fit (8.4/10) for Senior LLM Engineer role. Personalised outreach drafted.', urgency: 'medium', created_at: new Date(Date.now() - 45 * 60000).toISOString() },
+        { id: 'ap-002', action_type: 'shortlist_candidate', agent_name: 'talent', person_name: 'Sarah Park', reasoning: 'Exceptional GitHub activity + 7 years n8n/automation background. Proposing shortlist for CTO review.', urgency: 'high', created_at: new Date(Date.now() - 120 * 60000).toISOString() },
+        { id: 'ap-003', action_type: 'flag_performance_risk', agent_name: 'performance', person_name: 'James Wu', reasoning: 'Goal "Deliver API module" overdue by 5 days. No commits in 4 days. Risk: HIGH.', urgency: 'high', created_at: new Date(Date.now() - 200 * 60000).toISOString() },
+        { id: 'ap-004', action_type: 'send_rejection_email', agent_name: 'talent', person_name: 'Maria Santos', reasoning: 'Fit score 4.2/10. Missing 3 of 5 required skills. Draft rejection with feedback ready.', urgency: 'low', created_at: new Date(Date.now() - 400 * 60000).toISOString() },
+      ],
+      audit: [
+        { time: new Date(Date.now() - 2 * 60000).toISOString(), agent: 'scheduling', action: 'summarise_meeting', tier: 'auto_execute', risk: 'low', confidence: 0.93, success: true },
+        { time: new Date(Date.now() - 8 * 60000).toISOString(), agent: 'talent', action: 'screen_candidate', tier: 'needs_approval', risk: 'medium', confidence: 0.84, success: true },
+        { time: new Date(Date.now() - 15 * 60000).toISOString(), agent: 'onboarding', action: 'generate_plan', tier: 'auto_execute', risk: 'low', confidence: 0.97, success: true },
+        { time: new Date(Date.now() - 22 * 60000).toISOString(), agent: 'performance', action: 'weekly_brief', tier: 'auto_execute', risk: 'low', confidence: 0.88, success: true },
+        { time: new Date(Date.now() - 35 * 60000).toISOString(), agent: 'guardrails', action: 'guardrail_triggered', tier: 'blocked', risk: 'high', confidence: 1.0, success: true },
+        { time: new Date(Date.now() - 48 * 60000).toISOString(), agent: 'knowledge', action: 'policy_query', tier: 'auto_execute', risk: 'low', confidence: 0.91, success: true },
+        { time: new Date(Date.now() - 62 * 60000).toISOString(), agent: 'talent', action: 'draft_outreach', tier: 'needs_approval', risk: 'low', confidence: 0.89, success: true },
+        { time: new Date(Date.now() - 78 * 60000).toISOString(), agent: 'scheduling', action: 'cold_followup', tier: 'auto_execute', risk: 'low', confidence: 0.76, success: true },
+      ],
+      cold: [
+        { name: 'David Okonkwo', type: 'collaborator', status: 'active', priority: 9, days_cold: 21 },
+        { name: 'Priya Ramaswamy', type: 'candidate', status: 'prospect', priority: 8, days_cold: 18 },
+        { name: 'Tom Birch', type: 'client', status: 'active', priority: 8, days_cold: 16 },
+        { name: 'Anna Kowalski', type: 'partner', status: 'active', priority: 7, days_cold: 15 },
+        { name: 'Lucas Ferreira', type: 'lead', status: 'contacted', priority: 7, days_cold: 14 },
+      ]
+    };
+  }
+
+  // ============================================================
+  // RENDER
+  // ============================================================
+
+  function renderKPIs(data) {
+    document.getElementById('kpi-people').textContent      = data.kpis.people.toLocaleString();
+    document.getElementById('kpi-actions').textContent     = data.kpis.actions_today.toLocaleString();
+    document.getElementById('kpi-approvals').textContent   = data.kpis.pending_approvals;
+    document.getElementById('kpi-roles').textContent       = data.kpis.open_roles;
+    document.getElementById('kpi-cold').textContent        = data.kpis.cold_contacts;
+    document.getElementById('kpi-confidence').textContent  = (parseFloat(data.kpis.avg_confidence) * 100).toFixed(0) + '%';
+  }
+
+  function renderCharts(data) {
+    const chartDefaults = {
+      color: '#94a3b8',
+      borderColor: '#2a2d3e',
+    };
+    Chart.defaults.color = chartDefaults.color;
+
+    // Activity chart
+    if (charts.activity) charts.activity.destroy();
+    charts.activity = new Chart(document.getElementById('chart-activity'), {
+      type: 'bar',
+      data: {
+        labels: data.activity.labels,
+        datasets: [
+          { label: 'Talent',      data: data.activity.talent,      backgroundColor: '#6366f1', borderRadius: 4 },
+          { label: 'Scheduling',  data: data.activity.scheduling,  backgroundColor: '#10b981', borderRadius: 4 },
+          { label: 'Onboarding',  data: data.activity.onboarding,  backgroundColor: '#f59e0b', borderRadius: 4 },
+          { label: 'Performance', data: data.activity.performance, backgroundColor: '#ef4444', borderRadius: 4 },
+          { label: 'Knowledge',   data: data.activity.knowledge,   backgroundColor: '#8b5cf6', borderRadius: 4 },
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, padding: 12 } } },
+        scales: {
+          x: { stacked: true, grid: { color: '#2a2d3e' } },
+          y: { stacked: true, grid: { color: '#2a2d3e' }, ticks: { stepSize: 5 } }
+        }
+      }
+    });
+
+    // Tier doughnut
+    if (charts.tiers) charts.tiers.destroy();
+    charts.tiers = new Chart(document.getElementById('chart-tiers'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Auto-Execute', 'Needs Approval', 'Blocked'],
+        datasets: [{
+          data: [data.tiers.auto_execute, data.tiers.needs_approval, data.tiers.blocked],
+          backgroundColor: ['#10b981', '#f59e0b', '#6366f1'],
+          borderColor: '#1a1d27',
+          borderWidth: 3,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom', labels: { boxWidth: 12, padding: 12 } }
+        },
+        cutout: '65%'
+      }
+    });
+
+    // Pipeline bar
+    if (charts.pipeline) charts.pipeline.destroy();
+    charts.pipeline = new Chart(document.getElementById('chart-pipeline'), {
+      type: 'bar',
+      data: {
+        labels: data.pipeline.labels,
+        datasets: [{
+          label: 'Candidates',
+          data: data.pipeline.data,
+          backgroundColor: ['#6366f1','#818cf8','#a5b4fc','#c7d2fe','#e0e7ff','#10b981','#059669'],
+          borderRadius: 6,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { color: '#2a2d3e' } },
+          y: { grid: { color: '#2a2d3e' }, ticks: { stepSize: 5 } }
+        }
+      }
+    });
+
+    // Risk doughnut
+    if (charts.risk) charts.risk.destroy();
+    charts.risk = new Chart(document.getElementById('chart-risk'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Low', 'Medium', 'High', 'Critical'],
+        datasets: [{
+          data: [data.risk.low, data.risk.medium, data.risk.high, data.risk.critical],
+          backgroundColor: ['#10b981', '#f59e0b', '#ef4444', '#7f1d1d'],
+          borderColor: '#1a1d27',
+          borderWidth: 3,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom', labels: { boxWidth: 12, padding: 12 } }
+        },
+        cutout: '65%'
+      }
+    });
+  }
+
+  function renderApprovals(approvals) {
+    document.getElementById('approval-count').textContent = approvals.length;
+    const container = document.getElementById('approvals-container');
+    if (approvals.length === 0) {
+      container.innerHTML = '<div style="color: var(--muted); font-size: 13px; padding: 16px 0;">No pending approvals.</div>';
+      return;
+    }
+    container.innerHTML = approvals.map(a => {
+      const mins = Math.floor((Date.now() - new Date(a.created_at)) / 60000);
+      const urgencyClass = a.urgency === 'high' ? 'urgent' : '';
+      return `
+        <div class="approval-card ${urgencyClass}">
+          <div class="approval-info">
+            <div class="approval-action">${a.action_type.replace(/_/g, ' ')} — <strong>${a.person_name || 'Unknown'}</strong></div>
+            <div class="approval-meta">
+              <span class="agent-tag">${a.agent_name}</span>&nbsp;&nbsp;
+              ${a.reasoning}
+              &nbsp;&nbsp;· ${mins}m ago
+            </div>
+          </div>
+          <button class="btn btn-approve" onclick="approveAction('${a.id}', 'approve')">Approve</button>&nbsp;
+          <button class="btn btn-reject"  onclick="approveAction('${a.id}', 'reject')">Reject</button>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function renderAuditTable(audit) {
+    const tbody = document.getElementById('audit-table-body');
+    if (!audit.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:32px;">No audit entries yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = audit.map(row => {
+      const timeStr = new Date(row.time).toLocaleTimeString();
+      const riskClass = `risk-${row.risk || 'low'}`;
+      const tierClass = row.tier === 'auto_execute' ? 'tier-auto' : row.tier === 'needs_approval' ? 'tier-approval' : 'tier-blocked';
+      const confStr = row.confidence != null ? (row.confidence * 100).toFixed(0) + '%' : '—';
+      const result = row.success ? '<span style="color: #10b981;">✓ OK</span>' : '<span style="color: #ef4444;">✗ Error</span>';
+      return `
+        <tr>
+          <td>${timeStr}</td>
+          <td><span class="agent-tag">${row.agent}</span></td>
+          <td>${row.action.replace(/_/g, ' ')}</td>
+          <td><span class="tier-badge ${tierClass}">${row.tier.replace(/_/g, ' ')}</span></td>
+          <td><span class="risk-badge ${riskClass}">${row.risk || '—'}</span></td>
+          <td>${confStr}</td>
+          <td>${result}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function renderColdTable(cold) {
+    const tbody = document.getElementById('cold-table-body');
+    if (!cold.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:32px;">No cold contacts.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = cold.map(c => `
+      <tr>
+        <td><strong>${c.name}</strong></td>
+        <td>${c.type}</td>
+        <td>${c.status}</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="width:60px;height:6px;background:var(--border);border-radius:3px;">
+              <div style="width:${c.priority * 10}%;height:100%;background:var(--accent);border-radius:3px;"></div>
+            </div>
+            ${c.priority}/10
+          </div>
+        </td>
+        <td><span class="risk-badge ${c.days_cold >= 21 ? 'risk-high' : c.days_cold >= 14 ? 'risk-medium' : 'risk-low'}">${c.days_cold}d</span></td>
+        <td>
+          <button class="btn btn-approve" onclick="alert('Follow-up task created for ${c.name}')">Follow up</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  // ============================================================
+  // ACTIONS
+  // ============================================================
+
+  async function approveAction(id, action) {
+    alert(`Approval ${action}d for ${id}. In production, this calls your n8n approval webhook.`);
+    loadDashboard();
+  }
+
+  // ============================================================
+  // MAIN LOAD
+  // ============================================================
+
+  async function loadDashboard() {
+    getConfig();
+    document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+
+    // Try live API; fall back to mock data
+    const healthCheck = await apiFetch('/health');
+    let data;
+
+    if (healthCheck) {
+      // TODO: Implement real Postgres queries via API endpoints when connected
+      // For now, use mock data decorated with live health status
+      data = getMockData();
+    } else {
+      data = getMockData();
+    }
+
+    renderKPIs(data);
+    renderCharts(data);
+    renderApprovals(data.approvals);
+    renderAuditTable(data.audit);
+    renderColdTable(data.cold);
+  }
+
+  function toggleAutoRefresh() {
+    if (autoRefreshInterval) {
+      clearInterval(autoRefreshInterval);
+      autoRefreshInterval = null;
+      document.getElementById('auto-refresh-label').textContent = 'OFF';
+    } else {
+      autoRefreshInterval = setInterval(loadDashboard, 30000);
+      document.getElementById('auto-refresh-label').textContent = 'ON (30s)';
+    }
+  }
+
+  // Initial load with mock data
+  window.addEventListener('DOMContentLoaded', loadDashboard);
+</script>
+
+</body>
+</html>

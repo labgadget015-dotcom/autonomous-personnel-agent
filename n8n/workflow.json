@@ -1,0 +1,584 @@
+{
+  "name": "Autonomous Personnel Agent — Orchestrator",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "personnel-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-001",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "notes": "Receives events from: email trigger, Slack slash commands, n8n cron jobs, or manual API calls. Expects: {type, content, sender, metadata}"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24
+            }
+          ]
+        }
+      },
+      "id": "node-002",
+      "name": "Daily Cron Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 500],
+      "notes": "Triggers daily tasks: cold-relationship scan, performance brief, pipeline review"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise input from either webhook or cron trigger\nconst isWebhook = $input.first().json.body !== undefined;\n\nif (isWebhook) {\n  const body = $input.first().json.body;\n  return [\n    {\n      json: {\n        type: body.type || 'webhook',\n        content: body.content || '',\n        sender: body.sender || 'unknown',\n        metadata: body.metadata || {},\n        source: 'webhook'\n      }\n    }\n  ];\n} else {\n  // Cron trigger — inject daily task payload\n  return [\n    {\n      json: {\n        type: 'cron',\n        content: 'Daily autonomous personnel review: run cold-contact scan, performance brief, and pipeline summary.',\n        sender: 'system:cron',\n        metadata: {\n          tasks: ['cold_followups', 'performance_brief', 'pipeline_summary'],\n          date: new Date().toISOString()\n        },\n        source: 'cron'\n      }\n    }\n  ];\n}"
+      },
+      "id": "node-003",
+      "name": "Normalise Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 400],
+      "notes": "Standardises input from either trigger into a unified event schema"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PERSONNEL_API_URL }}/guardrails/evaluate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-token",
+              "value": "={{ $env.PERSONNEL_API_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ $json.content }}"
+            },
+            {
+              "name": "context",
+              "value": "={{ JSON.stringify($json.metadata) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-004",
+      "name": "Run Guardrails",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 400],
+      "notes": "First layer: PII detection, keyword flags, injection check. Returns risk_level, action_tier, escalation_path."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-critical",
+              "leftValue": "={{ $json.risk_level }}",
+              "rightValue": "critical",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-005",
+      "name": "Critical Veto Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [960, 400],
+      "notes": "If guardrails flagged CRITICAL (harassment, fraud, etc.) — bypass all agents and escalate directly to legal."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PERSONNEL_API_URL }}/route",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-token",
+              "value": "={{ $env.PERSONNEL_API_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({type: $('Normalise Input').item.json.type, content: $('Normalise Input').item.json.content, sender: $('Normalise Input').item.json.sender, metadata: $('Normalise Input').item.json.metadata}) }}",
+        "options": {}
+      },
+      "id": "node-006",
+      "name": "Orchestrator — Route Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 500],
+      "notes": "Orchestrator analyses the event and returns a routing plan: task_type, sub_agents, action_tier, plan steps."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.task_type }}",
+                    "rightValue": "recruiting",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "recruiting"
+            },
+            {
+              "conditions": {
+                "options": {},
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.task_type }}",
+                    "rightValue": "scheduling",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "scheduling"
+            },
+            {
+              "conditions": {
+                "options": {},
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.task_type }}",
+                    "rightValue": "onboarding",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "onboarding"
+            },
+            {
+              "conditions": {
+                "options": {},
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.task_type }}",
+                    "rightValue": "performance",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "performance"
+            },
+            {
+              "conditions": {
+                "options": {},
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.task_type }}",
+                    "rightValue": "knowledge_query",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "knowledge"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-007",
+      "name": "Route to Sub-Agent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1440, 500],
+      "notes": "Routes to the correct specialist sub-workflow based on orchestrator's task_type decision"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ $env.TALENT_WORKFLOW_ID }}",
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "plan": "={{ JSON.stringify($json.plan) }}",
+            "action_tier": "={{ $json.action_tier }}",
+            "task_id": "={{ $json.task_id }}"
+          }
+        }
+      },
+      "id": "node-008",
+      "name": "Execute Talent Sub-Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [1680, 280],
+      "notes": "Calls the Talent Agent sub-workflow (screen, outreach, pipeline)"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ $env.SCHEDULING_WORKFLOW_ID }}",
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "plan": "={{ JSON.stringify($json.plan) }}",
+            "action_tier": "={{ $json.action_tier }}",
+            "task_id": "={{ $json.task_id }}"
+          }
+        }
+      },
+      "id": "node-009",
+      "name": "Execute Scheduling Sub-Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [1680, 420],
+      "notes": "Calls the Scheduling Agent sub-workflow (meetings, follow-ups, invites)"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ $env.ONBOARDING_WORKFLOW_ID }}",
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "plan": "={{ JSON.stringify($json.plan) }}",
+            "action_tier": "={{ $json.action_tier }}",
+            "task_id": "={{ $json.task_id }}"
+          }
+        }
+      },
+      "id": "node-010",
+      "name": "Execute Onboarding Sub-Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [1680, 560],
+      "notes": "Calls the Onboarding Agent sub-workflow (plan generation, progress check)"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ $env.PERFORMANCE_WORKFLOW_ID }}",
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "plan": "={{ JSON.stringify($json.plan) }}",
+            "action_tier": "={{ $json.action_tier }}",
+            "task_id": "={{ $json.task_id }}"
+          }
+        }
+      },
+      "id": "node-011",
+      "name": "Execute Performance Sub-Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [1680, 700],
+      "notes": "Calls the Performance Agent sub-workflow (brief, goal risk, nudges)"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ $env.KNOWLEDGE_WORKFLOW_ID }}",
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "plan": "={{ JSON.stringify($json.plan) }}",
+            "action_tier": "={{ $json.action_tier }}",
+            "task_id": "={{ $json.task_id }}"
+          }
+        }
+      },
+      "id": "node-012",
+      "name": "Execute Knowledge Sub-Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [1680, 840],
+      "notes": "Calls the Knowledge Agent sub-workflow (policy Q&A, document generation)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action_tier }}",
+              "rightValue": "needs_approval",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-013",
+      "name": "Needs Approval?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1920, 500],
+      "notes": "If action_tier is needs_approval, route to human approval flow. Otherwise auto-execute and log."
+    },
+    {
+      "parameters": {
+        "channel": "={{ $env.SLACK_APPROVAL_CHANNEL }}",
+        "text": "=*Personnel Agent Approval Required*\n\n*Task:* {{ $json.action_type || 'Personnel Action' }}\n*Agent:* {{ $json.agent || 'unknown' }}\n*Priority:* {{ $json.priority || 'medium' }}\n\n*Summary:* {{ $json.reasoning || 'See payload for details.' }}\n\n*Action:*\n• ✅ <{{ $env.N8N_BASE_URL }}/webhook/approve?task_id={{ $json.task_id }}&action=approve|Approve>\n• ❌ <{{ $env.N8N_BASE_URL }}/webhook/approve?task_id={{ $json.task_id }}&action=reject|Reject>\n\n_Approval expires in 48 hours._",
+        "otherOptions": {}
+      },
+      "id": "node-014",
+      "name": "Send Slack Approval Request",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2160, 380],
+      "notes": "Sends approval request to Slack with Approve/Reject links. Configure SLACK_APPROVAL_CHANNEL in env."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Write audit log entry to Postgres via n8n Postgres node\n// In production, connect this to your actual Postgres node\nconst item = $input.first().json;\n\nreturn [\n  {\n    json: {\n      agent_name: item.agent || item.task_type || 'orchestrator',\n      action: item.action_tier === 'auto_execute' ? 'agent_decision' : 'approval_requested',\n      person_id: item.person_id || null,\n      task_id: item.task_id || null,\n      input_data: JSON.stringify({ task_type: item.task_type, sender: item.sender }),\n      output_data: JSON.stringify({ decision: item.final_decision || item.action_tier, reasoning: item.reasoning }),\n      reasoning: item.reasoning || '',\n      action_tier: item.action_tier || 'auto_execute',\n      confidence: item.confidence || null,\n      success: true,\n      created_at: new Date().toISOString()\n    }\n  }\n];"
+      },
+      "id": "node-015",
+      "name": "Prepare Audit Log Entry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 620],
+      "notes": "Formats the audit log entry. Connect output to a Postgres node to persist."
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "audit_log",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "node-016",
+      "name": "Write Audit Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2400, 620],
+      "notes": "Persists audit log to Postgres. Connect to your personnel_agent database."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build critical escalation notification for Legal/CHRO\nconst item = $input.first().json;\n\nreturn [\n  {\n    json: {\n      escalation_type: 'LEGAL_URGENT',\n      priority: 'CRITICAL',\n      subject: '[URGENT] Personnel Agent Critical Escalation — Immediate Review Required',\n      body: `CRITICAL alert from Autonomous Personnel Agent.\\n\\nRisk Level: ${item.risk_level}\\nReason: ${item.reason}\\nKeywords: ${(item.keyword_flags || []).join(', ')}\\nPolicy Flags: ${(item.policy_flags || []).join(', ')}\\n\\nOriginal content has been sanitised. Please review immediately.\\n\\nTimestamp: ${new Date().toISOString()}`,\n      pii_flags: item.pii_found || [],\n      keyword_flags: item.keyword_flags || [],\n      policy_flags: item.policy_flags || [],\n      task_id: item.task_id || null,\n      timestamp: new Date().toISOString()\n    }\n  }\n];"
+      },
+      "id": "node-017",
+      "name": "Build Critical Escalation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 240],
+      "notes": "Formats the critical escalation message for Legal/CHRO notification"
+    },
+    {
+      "parameters": {
+        "channel": "={{ $env.SLACK_LEGAL_CHANNEL }}",
+        "text": "=🚨 *CRITICAL PERSONNEL AGENT ALERT — IMMEDIATE LEGAL REVIEW REQUIRED* 🚨\n\n*Risk Level:* {{ $json.priority }}\n*Reason:* {{ $json.reason }}\n*Keywords Detected:* {{ $json.keyword_flags ? $json.keyword_flags.join(', ') : 'See log' }}\n\n⚠️ Original content has been sanitised and stored in audit log.\nTask ID: `{{ $json.task_id }}`\n\nPlease review immediately and take ownership of this case.",
+        "otherOptions": {}
+      },
+      "id": "node-018",
+      "name": "Alert Legal/CHRO",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1440, 240],
+      "notes": "Alerts the legal channel for critical escalations. Configure SLACK_LEGAL_CHANNEL in env."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({status: 'received', task_id: $('Normalise Input').item.json.metadata.task_id || Date.now().toString(), message: 'Event processed by Personnel Agent'}) }}"
+      },
+      "id": "node-019",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2640, 400],
+      "notes": "Returns acknowledgement to the webhook caller immediately"
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [{ "node": "Normalise Input", "type": "main", "index": 0 }]
+      ]
+    },
+    "Daily Cron Trigger": {
+      "main": [
+        [{ "node": "Normalise Input", "type": "main", "index": 0 }]
+      ]
+    },
+    "Normalise Input": {
+      "main": [
+        [{ "node": "Run Guardrails", "type": "main", "index": 0 }]
+      ]
+    },
+    "Run Guardrails": {
+      "main": [
+        [{ "node": "Critical Veto Check", "type": "main", "index": 0 }]
+      ]
+    },
+    "Critical Veto Check": {
+      "main": [
+        [{ "node": "Build Critical Escalation", "type": "main", "index": 0 }],
+        [{ "node": "Orchestrator — Route Event", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Critical Escalation": {
+      "main": [
+        [{ "node": "Alert Legal/CHRO", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert Legal/CHRO": {
+      "main": [
+        [{ "node": "Write Audit Log", "type": "main", "index": 0 }]
+      ]
+    },
+    "Orchestrator — Route Event": {
+      "main": [
+        [{ "node": "Route to Sub-Agent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route to Sub-Agent": {
+      "main": [
+        [{ "node": "Execute Talent Sub-Workflow", "type": "main", "index": 0 }],
+        [{ "node": "Execute Scheduling Sub-Workflow", "type": "main", "index": 0 }],
+        [{ "node": "Execute Onboarding Sub-Workflow", "type": "main", "index": 0 }],
+        [{ "node": "Execute Performance Sub-Workflow", "type": "main", "index": 0 }],
+        [{ "node": "Execute Knowledge Sub-Workflow", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute Talent Sub-Workflow": {
+      "main": [
+        [{ "node": "Needs Approval?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute Scheduling Sub-Workflow": {
+      "main": [
+        [{ "node": "Needs Approval?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute Onboarding Sub-Workflow": {
+      "main": [
+        [{ "node": "Needs Approval?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute Performance Sub-Workflow": {
+      "main": [
+        [{ "node": "Needs Approval?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute Knowledge Sub-Workflow": {
+      "main": [
+        [{ "node": "Needs Approval?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Needs Approval?": {
+      "main": [
+        [{ "node": "Send Slack Approval Request", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Audit Log Entry", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Slack Approval Request": {
+      "main": [
+        [{ "node": "Prepare Audit Log Entry", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Audit Log Entry": {
+      "main": [
+        [{ "node": "Write Audit Log", "type": "main", "index": 0 }]
+      ]
+    },
+    "Write Audit Log": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromAList",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    { "id": "tag-001", "name": "personnel-agent" },
+    { "id": "tag-002", "name": "multi-agent" },
+    { "id": "tag-003", "name": "production" }
+  ],
+  "triggerCount": 2,
+  "updatedAt": "2026-04-16T08:00:00.000Z",
+  "versionId": "v1.0.0",
+  "meta": {
+    "instanceId": "configure-your-n8n-instance-id",
+    "description": "Autonomous Personnel Agent main orchestrator workflow. Routes any HR/personnel event to specialist sub-agents: Talent, Scheduling, Onboarding, Performance, Knowledge. Includes guardrails, approval routing, audit logging, and critical escalation to legal.",
+    "setup_notes": [
+      "1. Set environment variables: PERSONNEL_API_URL, PERSONNEL_API_TOKEN, SLACK_APPROVAL_CHANNEL, SLACK_LEGAL_CHANNEL, N8N_BASE_URL",
+      "2. Configure Postgres credentials in the Write Audit Log node",
+      "3. Create sub-workflows for each agent (Talent, Scheduling, Onboarding, Performance, Knowledge) and set their workflow IDs in env vars",
+      "4. Configure Slack credentials in both Slack nodes",
+      "5. Activate the workflow and test with a POST to /webhook/personnel-webhook"
+    ]
+  }
+}

@@ -3,30 +3,47 @@ main.py — FastAPI Service for Autonomous Personnel Agent
 =========================================================
 Production-ready REST API wrapping the multi-agent system.
 
-Endpoints:
-  POST /route          — Orchestrator routing (classify and plan any event)
-  POST /talent/screen  — Screen a candidate against a role
-  POST /talent/outreach — Draft outreach email for a candidate
-  POST /scheduling/summarise — Summarise a meeting and extract action items
-  POST /scheduling/followups — Identify cold contacts needing follow-up
-  POST /scheduling/invite    — Draft a meeting invitation
-  POST /onboarding/plan      — Generate onboarding plan for a new collaborator
-  POST /onboarding/check     — Check progress on an onboarding plan
-  POST /performance/brief    — Generate weekly performance brief
-  POST /performance/goal-risk — Assess risk on a specific goal
-  POST /knowledge/answer     — Answer a policy/SOP question via RAG
-  POST /knowledge/generate   — Generate an internal document
-  POST /guardrails/evaluate  — Run guardrail checks on any text
+Enhancements in this version:
+  - Structured JSON logging (structlog) on every request
+  - Request ID middleware — UUID per request, echoed in X-Request-ID header
+  - Per-token rate limiting (slowapi + Redis) — 20 req/min on agent routes
+  - LLM token cost tracking callback — per-agent token/USD counters at /metrics
+  - arq async job queue — POST /async/* returns {job_id} immediately;
+    GET /jobs/{job_id} polls result (prevents 30s gateway timeouts)
+  - Webhook retry helper available via webhooks.post_webhook
 
-  GET  /health         — Deep health check: Postgres, LLM client, env, disk
-  GET  /health/live    — Liveness probe (no external checks — always 200 if process runs)
-  GET  /metrics        — Basic service metrics
+Synchronous endpoints (kept for backwards-compat with existing n8n nodes):
+  POST /route, /talent/*, /scheduling/*, /onboarding/*, /performance/*,
+  /knowledge/*, /guardrails/*
+
+Async endpoints (new — for long-running calls):
+  POST /async/route
+  POST /async/talent/screen
+  POST /async/talent/outreach
+  POST /async/talent/pipeline-summary
+  POST /async/scheduling/summarise
+  POST /async/scheduling/followups
+  POST /async/scheduling/invite
+  POST /async/onboarding/plan
+  POST /async/onboarding/check
+  POST /async/onboarding/offboarding
+  POST /async/performance/brief
+  POST /async/performance/goal-risk
+  POST /async/knowledge/answer
+  POST /async/knowledge/generate
+  GET  /jobs/{job_id}    — Poll job status + result
+
+System:
+  GET  /health           — Deep health check (Postgres, LLM key probe, env, disk)
+  GET  /health/live      — Liveness probe (always 200)
+  GET  /metrics          — Token cost + request counters
 """
 
 import os
 import time
 import uuid
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +51,11 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+# ---- Structured logging (configure before any other imports log) ----
+from logging_config import configure_logging, get_logger
+configure_logging()
+log = get_logger("personnel-agent")
 
 from agents import (
     OrchestratorAgent,
@@ -45,27 +67,82 @@ from agents import (
 )
 from guardrails import evaluate as guardrails_evaluate, GuardrailResult
 from health import run_health_checks
+from middleware.request_id import RequestIDMiddleware
+from middleware.cost_tracker import CostTrackingCallback, get_cumulative_cost
+
+# ---- Rate limiting (requires Redis — soft-fail if unavailable) ----
+try:
+    from slowapi.errors import RateLimitExceeded
+    from middleware.rate_limit import limiter, rate_limit_exceeded_handler, AGENT_RATE_LIMIT
+    _rate_limit_available = True
+except ImportError:
+    _rate_limit_available = False
+    AGENT_RATE_LIMIT = "20/minute"
+
+# ---- arq job queue (requires Redis — soft-fail if unavailable) ----
+_arq_pool = None
+
+async def _get_arq_pool():
+    """Return a shared arq Redis pool, initialised on first call."""
+    global _arq_pool
+    if _arq_pool is None:
+        try:
+            from arq import create_pool
+            from arq.connections import RedisSettings
+            from urllib.parse import urlparse
+            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+            parsed = urlparse(redis_url)
+            settings = RedisSettings(
+                host=parsed.hostname or "localhost",
+                port=parsed.port or 6379,
+                password=parsed.password or None,
+            )
+            _arq_pool = await create_pool(settings)
+            log.info("arq_pool_connected", redis_url=redis_url)
+        except Exception as exc:
+            log.warning("arq_pool_unavailable", error=str(exc),
+                       detail="Async /async/* endpoints will return 503")
+    return _arq_pool
+
 
 # ============================================================
-# LOGGING
+# APP LIFECYCLE
 # ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("personnel-agent")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialise arq pool on startup; close on shutdown."""
+    log.info("service_starting", service="autonomous-personnel-agent")
+    pool = await _get_arq_pool()
+    if pool:
+        app.state.arq_pool = pool
+    yield
+    log.info("service_stopping")
+    if _arq_pool:
+        await _arq_pool.aclose()
+
 
 # ============================================================
 # APP INIT
 # ============================================================
+
 app = FastAPI(
     title="Autonomous Personnel Agent API",
-    description="Multi-agent system for autonomous personnel management (n8n-compatible)",
-    version="1.0.0",
+    description=(
+        "Multi-agent system for autonomous personnel management (n8n-compatible). "
+        "Use POST /async/* for long-running agent calls; poll GET /jobs/{job_id} for results."
+    ),
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
+# ---- Middleware: order matters — registered in reverse call order ----
+# 1. Request ID (outermost — assigns ID before anything logs)
+app.add_middleware(RequestIDMiddleware)
+
+# 2. CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
@@ -74,7 +151,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Simple in-memory metrics (replace with Prometheus in production)
+# 3. Rate limiting
+if _rate_limit_available:
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+# ---- In-memory metrics ----
 _metrics: Dict[str, Any] = {
     "requests_total": 0,
     "errors_total": 0,
@@ -183,23 +265,57 @@ class GuardrailsRequest(BaseModel):
     sender_history: Optional[Dict] = None
 
 
+class AsyncJobResponse(BaseModel):
+    job_id: str
+    status: str = "queued"
+    message: str = "Job enqueued. Poll GET /jobs/{job_id} for result."
+
+
 # ============================================================
-# MIDDLEWARE: Request logging + metrics
+# MIDDLEWARE: Structured request logging + metrics
 # ============================================================
 
 @app.middleware("http")
-async def request_middleware(request: Request, call_next):
+async def request_logging_middleware(request: Request, call_next):
     start = time.time()
     _metrics["requests_total"] += 1
     try:
         response = await call_next(request)
-        duration_ms = int((time.time() - start) * 1000)
-        logger.info(f"{request.method} {request.url.path} → {response.status_code} ({duration_ms}ms)")
+        latency_ms = int((time.time() - start) * 1000)
+        log.info(
+            "request_complete",
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            latency_ms=latency_ms,
+        )
         return response
-    except Exception as e:
+    except Exception as exc:
         _metrics["errors_total"] += 1
-        logger.error(f"Unhandled error on {request.url.path}: {e}")
+        log.exception("unhandled_error", path=request.url.path, error=str(exc))
         raise
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def _cost_callback(agent: str) -> CostTrackingCallback:
+    """Return a cost-tracking callback for the named agent."""
+    return CostTrackingCallback(agent=agent)
+
+
+async def _enqueue(func_name: str, request_id: str, **kwargs) -> AsyncJobResponse:
+    """Enqueue a job on the arq worker pool. Raises 503 if Redis unavailable."""
+    pool = await _get_arq_pool()
+    if pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Async job queue unavailable. Redis is not connected. "
+                   "Use the synchronous endpoint instead.",
+        )
+    job = await pool.enqueue_job(func_name, **kwargs, _job_id=request_id)
+    return AsyncJobResponse(job_id=job.job_id)
 
 
 # ============================================================
@@ -208,29 +324,17 @@ async def request_middleware(request: Request, call_next):
 
 @app.get("/health", tags=["System"])
 async def health():
-    """
-    Deep health check.
-    Probes: Postgres connectivity (latency), LLM client config,
-    required environment variables, and disk space.
-
-    Returns HTTP 200 (ok/degraded) or 503 (unhealthy).
-    """
     response, http_status = run_health_checks()
     return JSONResponse(status_code=http_status, content=response)
 
 
 @app.get("/health/live", tags=["System"])
 async def liveness():
-    """
-    Kubernetes/Docker liveness probe — never hits external services.
-    Always returns 200 as long as the process is running.
-    Use this for fast health probes in load balancers.
-    """
     from health import _SERVICE_START_WALL, BUILD_VERSION, BUILD_SHA
     return {
         "status": "ok",
         "service": "autonomous-personnel-agent",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "build_version": BUILD_VERSION,
         "build_sha": BUILD_SHA,
         "started_at": _SERVICE_START_WALL,
@@ -240,235 +344,295 @@ async def liveness():
 
 @app.get("/metrics", tags=["System"])
 async def metrics(_: str = Depends(verify_token)):
+    cost_data = get_cumulative_cost()
     return {
         **_metrics,
         "uptime_seconds": int(
             (datetime.now(timezone.utc) - datetime.fromisoformat(_metrics["started_at"])).total_seconds()
         ),
+        "llm_cost": cost_data,
     }
 
 
 # ============================================================
-# ORCHESTRATOR
+# JOB POLLING
+# ============================================================
+
+@app.get("/jobs/{job_id}", tags=["AsyncJobs"])
+async def get_job(job_id: str, _: str = Depends(verify_token)):
+    """
+    Poll the result of an async agent job.
+    Returns status: queued | in_progress | complete | failed | not_found
+    """
+    pool = await _get_arq_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Job queue unavailable")
+    try:
+        from arq.jobs import Job, JobStatus
+        job = Job(job_id, pool)
+        status = await job.status()
+        if status == JobStatus.not_found:
+            raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+        if status in (JobStatus.complete,):
+            result = await job.result(timeout=0)
+            return {"job_id": job_id, "status": "complete", "result": result}
+        return {"job_id": job_id, "status": status.value}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ============================================================
+# ORCHESTRATOR — sync + async
 # ============================================================
 
 @app.post("/route", tags=["Orchestrator"])
-async def route_event(
-    req: EventRequest,
-    _: str = Depends(verify_token),
-):
-    """
-    Route any personnel event to the correct specialist agent(s).
-    Returns a structured plan for n8n to execute.
-    """
+async def route_event(req: EventRequest, request: Request, _: str = Depends(verify_token)):
     try:
         orch = OrchestratorAgent()
         plan = orch.route(req.model_dump())
-        plan["request_id"] = str(uuid.uuid4())
+        plan["request_id"] = request.headers.get("x-request-id", str(uuid.uuid4()))
+        log.info("orchestrator_routed", event_type=req.type)
         return plan
-    except Exception as e:
+    except Exception as exc:
         _metrics["errors_total"] += 1
-        logger.exception("Orchestrator error")
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("orchestrator_error", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/route", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_route_event(req: EventRequest, request: Request, _: str = Depends(verify_token)):
+    """Async version of /route — returns immediately with a job_id."""
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_route", rid, payload=req.model_dump())
 
 
 # ============================================================
-# TALENT AGENT
+# TALENT AGENT — sync + async
 # ============================================================
 
 @app.post("/talent/screen", tags=["Talent"])
-async def screen_candidate(
-    req: CandidateScreenRequest,
-    _: str = Depends(verify_token),
-):
-    """Screen a candidate against an open role."""
+async def screen_candidate(req: CandidateScreenRequest, request: Request, _: str = Depends(verify_token)):
     try:
         agent = TalentAgent()
-        return agent.screen_candidate(req.candidate_profile, req.role, req.history)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        result = agent.screen_candidate(req.candidate_profile, req.role, req.history)
+        log.info("talent_screen_complete")
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/talent/screen", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_screen_candidate(req: CandidateScreenRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_talent_screen", rid,
+                          candidate_profile=req.candidate_profile,
+                          role=req.role, history=req.history)
 
 
 @app.post("/talent/outreach", tags=["Talent"])
-async def draft_outreach(
-    req: OutreachRequest,
-    _: str = Depends(verify_token),
-):
-    """Draft a personalised cold-outreach email for a candidate."""
+async def draft_outreach(req: OutreachRequest, _: str = Depends(verify_token)):
     try:
         agent = TalentAgent()
         return agent.draft_outreach(req.candidate, req.role, req.tone)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/talent/outreach", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_draft_outreach(req: OutreachRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_talent_outreach", rid,
+                          candidate=req.candidate, role=req.role, tone=req.tone)
 
 
 @app.post("/talent/pipeline-summary", tags=["Talent"])
-async def pipeline_summary(
-    pipeline_data: List[Dict],
-    _: str = Depends(verify_token),
-):
-    """Summarise the state of all active recruiting pipelines."""
+async def pipeline_summary(pipeline_data: List[Dict], _: str = Depends(verify_token)):
     try:
         agent = TalentAgent()
         return agent.build_pipeline_summary(pipeline_data)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/talent/pipeline-summary", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_pipeline_summary(pipeline_data: List[Dict], request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_talent_pipeline_summary", rid, pipeline_data=pipeline_data)
 
 
 # ============================================================
-# SCHEDULING AGENT
+# SCHEDULING AGENT — sync + async
 # ============================================================
 
 @app.post("/scheduling/summarise", tags=["Scheduling"])
-async def summarise_meeting(
-    req: MeetingSummaryRequest,
-    _: str = Depends(verify_token),
-):
-    """Summarise a meeting and extract action items / commitments."""
+async def summarise_meeting(req: MeetingSummaryRequest, _: str = Depends(verify_token)):
     try:
         agent = SchedulingAgent()
         return agent.summarise_meeting(req.meeting_notes, req.attendees, req.context)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/scheduling/summarise", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_summarise_meeting(req: MeetingSummaryRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_scheduling_summarise", rid,
+                          meeting_notes=req.meeting_notes, attendees=req.attendees, context=req.context)
 
 
 @app.post("/scheduling/followups", tags=["Scheduling"])
-async def identify_followups(
-    req: FollowupsRequest,
-    _: str = Depends(verify_token),
-):
-    """Identify cold relationships that need a follow-up."""
+async def identify_followups(req: FollowupsRequest, _: str = Depends(verify_token)):
     try:
         agent = SchedulingAgent()
         return agent.identify_cold_followups(req.people, req.threshold_days)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/scheduling/followups", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_identify_followups(req: FollowupsRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_scheduling_followups", rid,
+                          people=req.people, threshold_days=req.threshold_days)
 
 
 @app.post("/scheduling/invite", tags=["Scheduling"])
-async def draft_invite(
-    req: MeetingInviteRequest,
-    _: str = Depends(verify_token),
-):
-    """Draft a meeting invitation with agenda."""
+async def draft_invite(req: MeetingInviteRequest, _: str = Depends(verify_token)):
     try:
         agent = SchedulingAgent()
-        return agent.draft_meeting_invite(
-            req.purpose, req.attendees, req.duration_minutes, req.context
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return agent.draft_meeting_invite(req.purpose, req.attendees, req.duration_minutes, req.context)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/scheduling/invite", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_draft_invite(req: MeetingInviteRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_scheduling_invite", rid, purpose=req.purpose,
+                          attendees=req.attendees, duration_minutes=req.duration_minutes, context=req.context)
 
 
 # ============================================================
-# ONBOARDING AGENT
+# ONBOARDING AGENT — sync + async
 # ============================================================
 
 @app.post("/onboarding/plan", tags=["Onboarding"])
-async def create_onboarding_plan(
-    req: OnboardingPlanRequest,
-    _: str = Depends(verify_token),
-):
-    """Generate a customised onboarding plan for a new collaborator."""
+async def create_onboarding_plan(req: OnboardingPlanRequest, _: str = Depends(verify_token)):
     try:
         agent = OnboardingAgent()
-        return agent.generate_onboarding_plan(
-            req.person, req.role, req.tools, req.company_links
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return agent.generate_onboarding_plan(req.person, req.role, req.tools, req.company_links)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/onboarding/plan", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_create_onboarding_plan(req: OnboardingPlanRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_onboarding_plan", rid, person=req.person, role=req.role,
+                          tools=req.tools, company_links=req.company_links)
 
 
 @app.post("/onboarding/check", tags=["Onboarding"])
-async def check_onboarding(
-    req: OnboardingCheckRequest,
-    _: str = Depends(verify_token),
-):
-    """Check progress on an active onboarding plan and flag overdue items."""
+async def check_onboarding(req: OnboardingCheckRequest, _: str = Depends(verify_token)):
     try:
         agent = OnboardingAgent()
         return agent.check_onboarding_progress(req.plan, req.days_since_start)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/onboarding/check", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_check_onboarding(req: OnboardingCheckRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_onboarding_check", rid, plan=req.plan, days_since_start=req.days_since_start)
 
 
 @app.post("/onboarding/offboarding", tags=["Onboarding"])
-async def create_offboarding(
-    req: OffboardingRequest,
-    _: str = Depends(verify_token),
-):
-    """Generate an offboarding plan and checklist."""
+async def create_offboarding(req: OffboardingRequest, _: str = Depends(verify_token)):
     try:
         agent = OnboardingAgent()
-        return agent.generate_offboarding_plan(
-            req.person, req.reason, req.last_day, req.access_to_revoke
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return agent.generate_offboarding_plan(req.person, req.reason, req.last_day, req.access_to_revoke)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/onboarding/offboarding", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_create_offboarding(req: OffboardingRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_onboarding_offboarding", rid, person=req.person, reason=req.reason,
+                          last_day=req.last_day, access_to_revoke=req.access_to_revoke)
 
 
 # ============================================================
-# PERFORMANCE AGENT
+# PERFORMANCE AGENT — sync + async
 # ============================================================
 
 @app.post("/performance/brief", tags=["Performance"])
-async def weekly_brief(
-    req: PerformanceBriefRequest,
-    _: str = Depends(verify_token),
-):
-    """Generate the weekly 'Top People to Watch' performance brief."""
+async def weekly_brief(req: PerformanceBriefRequest, _: str = Depends(verify_token)):
     try:
         agent = PerformanceAgent()
-        return agent.generate_weekly_brief(
-            req.people, req.goals, req.recent_interactions, req.github_activity
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return agent.generate_weekly_brief(req.people, req.goals, req.recent_interactions, req.github_activity)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/performance/brief", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_weekly_brief(req: PerformanceBriefRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_performance_brief", rid, people=req.people, goals=req.goals,
+                          recent_interactions=req.recent_interactions, github_activity=req.github_activity)
 
 
 @app.post("/performance/goal-risk", tags=["Performance"])
-async def goal_risk(
-    req: GoalRiskRequest,
-    _: str = Depends(verify_token),
-):
-    """Assess whether a specific goal is at risk of being missed."""
+async def goal_risk(req: GoalRiskRequest, _: str = Depends(verify_token)):
     try:
         agent = PerformanceAgent()
         return agent.assess_goal_risk(req.goal, req.person, req.interactions)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/performance/goal-risk", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_goal_risk(req: GoalRiskRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_performance_goal_risk", rid,
+                          goal=req.goal, person=req.person, interactions=req.interactions)
 
 
 # ============================================================
-# KNOWLEDGE AGENT
+# KNOWLEDGE AGENT — sync + async
 # ============================================================
 
 @app.post("/knowledge/answer", tags=["Knowledge"])
-async def answer_policy_question(
-    req: KnowledgeAnswerRequest,
-    _: str = Depends(verify_token),
-):
-    """Answer a policy or SOP question using the internal knowledge base."""
+async def answer_policy_question(req: KnowledgeAnswerRequest, _: str = Depends(verify_token)):
     try:
-        agent = KnowledgeAgent(
-            vectorstore_path=os.getenv("KNOWLEDGE_VECTORSTORE_PATH")
-        )
+        agent = KnowledgeAgent(vectorstore_path=os.getenv("KNOWLEDGE_VECTORSTORE_PATH"))
         return agent.answer_policy_question(req.question, req.raw_docs)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/knowledge/answer", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_answer_policy_question(req: KnowledgeAnswerRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_knowledge_answer", rid, question=req.question, raw_docs=req.raw_docs)
 
 
 @app.post("/knowledge/generate", tags=["Knowledge"])
-async def generate_document(
-    req: DocumentGenerateRequest,
-    _: str = Depends(verify_token),
-):
-    """Generate an internal document (SOP, policy, handbook section, etc.)."""
+async def generate_document(req: DocumentGenerateRequest, _: str = Depends(verify_token)):
     try:
         agent = KnowledgeAgent()
         return agent.generate_document(req.doc_type, req.context)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/async/knowledge/generate", tags=["AsyncJobs"], response_model=AsyncJobResponse)
+async def async_generate_document(req: DocumentGenerateRequest, request: Request, _: str = Depends(verify_token)):
+    rid = request.headers.get("x-request-id", str(uuid.uuid4()))
+    return await _enqueue("run_knowledge_generate", rid, doc_type=req.doc_type, context=req.context)
 
 
 # ============================================================
@@ -476,18 +640,9 @@ async def generate_document(
 # ============================================================
 
 @app.post("/guardrails/evaluate", tags=["Guardrails"])
-async def evaluate_guardrails(
-    req: GuardrailsRequest,
-    _: str = Depends(verify_token),
-):
-    """
-    Run the full guardrail stack on any text.
-    Use this before sending agent outputs to external channels.
-    """
+async def evaluate_guardrails(req: GuardrailsRequest, _: str = Depends(verify_token)):
     try:
-        result: GuardrailResult = guardrails_evaluate(
-            req.text, req.context, req.sender_history
-        )
+        result: GuardrailResult = guardrails_evaluate(req.text, req.context, req.sender_history)
         return {
             "passed": result.passed,
             "risk_level": result.risk_level,
@@ -500,8 +655,8 @@ async def evaluate_guardrails(
             "injection_detected": result.injection_detected,
             "sanitised_text": result.sanitised_text,
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ============================================================

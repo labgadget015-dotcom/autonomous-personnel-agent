@@ -17,7 +17,9 @@
 #
 # Services:
 #   postgres  → localhost:5432
+#   redis     → localhost:6379  (arq job queue + rate-limit store)
 #   api       → localhost:8000  (FastAPI + Swagger UI at /docs)
+#   worker    → (no port — background arq job processor)
 #   n8n       → localhost:5678  (n8n editor)
 #   dashboard → localhost:3000  (monitoring dashboard)
 #
@@ -64,6 +66,32 @@ services:
         max-file: "3"
 
   # ----------------------------------------------------------
+  # REDIS — arq job queue + slowapi rate-limit storage
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: personnel-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - personnel-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ----------------------------------------------------------
   # FASTAPI SERVICE — Orchestrator + 5 sub-agents
   # Set API_IMAGE env var to pull from GHCR instead of building:
   #   API_IMAGE=ghcr.io/labgadget015-dotcom/autonomous-personnel-agent:latest
@@ -78,6 +106,8 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     environment:
       # OpenAI — required
@@ -95,6 +125,13 @@ services:
       CORS_ORIGINS: "http://localhost:5678,http://localhost:3000,http://localhost:8080"
       # Knowledge base vectorstore (mounted below)
       KNOWLEDGE_VECTORSTORE_PATH: /app/knowledge_index
+      # Redis — arq job queue + rate limiting
+      REDIS_URL: redis://redis:6379
+      # Rate limiting (requests per minute per token)
+      RATE_LIMIT_AGENT: ${RATE_LIMIT_AGENT:-20/minute}
+      RATE_LIMIT_DEFAULT: ${RATE_LIMIT_DEFAULT:-60/minute}
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Runtime
       ENV: ${ENV:-production}
       PORT: "8000"
@@ -111,6 +148,54 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      - personnel-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ----------------------------------------------------------
+  # ARQ WORKER — Async background job processor
+  # Processes all /async/* jobs enqueued by the API service.
+  # Shares the same image and code as the api service.
+  # ----------------------------------------------------------
+  worker:
+    image: ${API_IMAGE:-}
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      target: production
+    container_name: personnel-worker
+    restart: unless-stopped
+    # Override the default CMD to run the arq worker instead of uvicorn
+    command: python -m arq worker.WorkerSettings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-gpt-4.1}
+      AGENT_MODEL: ${AGENT_MODEL:-gpt-4.1-mini}
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-personnel_agent}
+      REDIS_URL: redis://redis:6379
+      KNOWLEDGE_VECTORSTORE_PATH: /app/knowledge_index
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENV: ${ENV:-production}
+    volumes:
+      - knowledge_index:/app/knowledge_index
+    # No port binding — worker only consumes from Redis queue
+    healthcheck:
+      # arq writes a heartbeat key; check it
+      test: ["CMD-SHELL", "redis-cli -h redis ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     networks:
       - personnel-net
     logging:
@@ -226,6 +311,8 @@ networks:
 volumes:
   postgres_data:
     name: personnel-postgres-data
+  redis_data:
+    name: personnel-redis-data
   n8n_data:
     name: personnel-n8n-data
   knowledge_index:

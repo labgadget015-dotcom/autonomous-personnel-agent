@@ -116,8 +116,12 @@ def _check_postgres() -> Dict[str, Any]:
 
 def _check_llm_client() -> Dict[str, Any]:
     """
-    Verify the OpenAI client can be instantiated with the configured key.
-    Does NOT make any API call or spend tokens — just validates config.
+    Verify the OpenAI API key is valid by making a lightweight models.list()
+    probe. This spends zero tokens but confirms the key has not been revoked
+    or expired — catching rotation failures before the first real agent call.
+
+    Probe: GET /v1/models  (< 100ms, no token cost, returns empty list on
+    restricted-scope keys — that is still a valid 200 response).
     """
     api_key = os.getenv("OPENAI_API_KEY", "")
     orchestrator_model = os.getenv("ORCHESTRATOR_MODEL", "gpt-4.1")
@@ -126,40 +130,82 @@ def _check_llm_client() -> Dict[str, Any]:
     if not api_key:
         return {
             "status": "fail",
-            "model": orchestrator_model,
+            "orchestrator_model": orchestrator_model,
+            "agent_model": agent_model,
             "detail": "OPENAI_API_KEY is not set",
+            "key_rotation": "unknown",
         }
 
     if not api_key.startswith("sk-"):
         return {
             "status": "warn",
-            "model": orchestrator_model,
+            "orchestrator_model": orchestrator_model,
+            "agent_model": agent_model,
             "detail": "OPENAI_API_KEY present but format looks unexpected (not sk-*). Key may be invalid.",
+            "key_rotation": "format_warning",
         }
 
-    # Attempt client instantiation (no network call)
+    # Lightweight live probe — catches expired/revoked keys immediately
     try:
-        from openai import OpenAI  # type: ignore[import]
-        client = OpenAI(api_key=api_key)
-        # Access the models attribute just to ensure the client is properly constructed
-        _ = client.models
+        import openai  # type: ignore[import]
+        client = openai.OpenAI(api_key=api_key, timeout=5.0)
+        client.models.list()  # GET /v1/models — no tokens, confirms auth
         return {
             "status": "ok",
             "orchestrator_model": orchestrator_model,
             "agent_model": agent_model,
-            "detail": "Client instantiated successfully — key format valid",
+            "detail": "Key valid — /v1/models probe succeeded",
+            "key_rotation": "ok",
         }
+
+    except openai.AuthenticationError:
+        # Key is present but rejected by OpenAI — expired, revoked, or wrong
+        logger.warning("OPENAI_API_KEY failed authentication — key may have been rotated or revoked")
+        return {
+            "status": "fail",
+            "orchestrator_model": orchestrator_model,
+            "agent_model": agent_model,
+            "detail": "OPENAI_API_KEY is invalid or has been revoked. Rotate the key immediately.",
+            "key_rotation": "invalid",
+        }
+
+    except openai.RateLimitError:
+        # Key is valid but throttled — degraded, not dead
+        return {
+            "status": "degraded",
+            "orchestrator_model": orchestrator_model,
+            "agent_model": agent_model,
+            "detail": "OPENAI_API_KEY is valid but rate-limited. Agent calls may fail.",
+            "key_rotation": "rate_limited",
+        }
+
+    except openai.PermissionDeniedError:
+        # Key exists but lacks permission for this org/model
+        return {
+            "status": "warn",
+            "orchestrator_model": orchestrator_model,
+            "agent_model": agent_model,
+            "detail": "OPENAI_API_KEY lacks permission for the configured model. Check org/project settings.",
+            "key_rotation": "permission_denied",
+        }
+
     except ImportError:
         return {
             "status": "warn",
-            "model": orchestrator_model,
+            "orchestrator_model": orchestrator_model,
+            "agent_model": agent_model,
             "detail": "openai package not importable",
+            "key_rotation": "unknown",
         }
+
     except Exception as exc:
+        # Network timeout or other transient error — warn, not fail
         return {
             "status": "warn",
-            "model": orchestrator_model,
-            "detail": f"Client instantiation warning: {exc}",
+            "orchestrator_model": orchestrator_model,
+            "agent_model": agent_model,
+            "detail": f"Key probe inconclusive (transient error): {exc}",
+            "key_rotation": "probe_failed",
         }
 
 

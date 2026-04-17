@@ -701,6 +701,153 @@ async def async_generate_document(req: DocumentGenerateRequest, request: Request
 
 
 # ============================================================
+# DB HELPER (psycopg2 — for self-refining system endpoints)
+# ============================================================
+
+import psycopg2
+import psycopg2.extras
+from contextlib import contextmanager
+
+
+@contextmanager
+def _get_db():
+    """Yield a psycopg2 connection with DictCursor for the self-refining endpoints."""
+    database_url = os.getenv(
+        "DATABASE_URL",
+        "postgresql://agent:agent@localhost:5432/personnel_agent",
+    )
+    conn = psycopg2.connect(database_url, connect_timeout=5)
+    conn.autocommit = False
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+# ============================================================
+# SELF-REFINING SYSTEM ENDPOINTS
+# ============================================================
+
+@app.get("/prompts", tags=["SelfRefining"])
+async def list_prompts(token: str = Depends(verify_token)):
+    """List all agents with their active prompt version and avg score."""
+    with _get_db() as db:
+        with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT agent, version, score_avg, sample_count, created_at, notes
+                   FROM prompt_versions WHERE status = 'active' ORDER BY agent"""
+            )
+            rows = cur.fetchall()
+    return {"prompts": [dict(r) for r in rows]}
+
+
+@app.get("/prompts/{agent}", tags=["SelfRefining"])
+async def get_prompt_history(agent: str, token: str = Depends(verify_token)):
+    with _get_db() as db:
+        with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT version, status, score_avg, sample_count, promoted_at, created_at, notes
+                   FROM prompt_versions WHERE agent = %s ORDER BY created_at DESC""",
+                (agent,),
+            )
+            rows = cur.fetchall()
+    return {"agent": agent, "versions": [dict(r) for r in rows]}
+
+
+@app.post("/prompts/{agent}/rollback", tags=["SelfRefining"])
+async def rollback_prompt(agent: str, token: str = Depends(verify_token)):
+    """Roll back to the most recent archived version."""
+    with _get_db() as db:
+        with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, version FROM prompt_versions
+                   WHERE agent = %s AND status = 'archived'
+                   ORDER BY archived_at DESC LIMIT 1""",
+                (agent,),
+            )
+            archived = cur.fetchone()
+            if not archived:
+                raise HTTPException(404, "No archived version to roll back to")
+            cur.execute(
+                "UPDATE prompt_versions SET status = 'archived', archived_at = NOW() WHERE agent = %s AND status = 'active'",
+                (agent,),
+            )
+            cur.execute(
+                "UPDATE prompt_versions SET status = 'active', promoted_at = NOW() WHERE id = %s",
+                (archived["id"],),
+            )
+        db.commit()
+    log.info("prompt_rollback", agent=agent, version=archived["version"])
+    return {"agent": agent, "rolled_back_to": archived["version"]}
+
+
+@app.get("/outcomes", tags=["SelfRefining"])
+async def get_outcomes(agent: str = None, limit: int = 50, token: str = Depends(verify_token)):
+    with _get_db() as db:
+        with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if agent:
+                cur.execute(
+                    "SELECT * FROM agent_outcomes WHERE agent = %s ORDER BY created_at DESC LIMIT %s",
+                    (agent, limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM agent_outcomes ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
+            rows = cur.fetchall()
+    return {"outcomes": [dict(r) for r in rows]}
+
+
+@app.get("/outcomes/stats", tags=["SelfRefining"])
+async def get_outcome_stats(token: str = Depends(verify_token)):
+    """Per-agent pass rate, avg score, failure breakdown for the last 24h."""
+    with _get_db() as db:
+        with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT agent,
+                          COUNT(*) as total,
+                          SUM(CASE WHEN passed THEN 1 ELSE 0 END) as passed_count,
+                          ROUND(AVG(score)::numeric, 2) as avg_score,
+                          ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END) / COUNT(*)::numeric, 1) as pass_rate_pct
+                   FROM agent_outcomes
+                   WHERE created_at > NOW() - INTERVAL '24 hours'
+                   GROUP BY agent ORDER BY agent"""
+            )
+            rows = cur.fetchall()
+    return {"stats": [dict(r) for r in rows], "window": "24h"}
+
+
+@app.get("/reflections", tags=["SelfRefining"])
+async def get_reflections(agent: str = None, token: str = Depends(verify_token)):
+    with _get_db() as db:
+        with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if agent:
+                cur.execute(
+                    "SELECT * FROM agent_reflections WHERE agent = %s AND is_active = TRUE ORDER BY created_at DESC LIMIT 20",
+                    (agent,),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM agent_reflections WHERE is_active = TRUE ORDER BY created_at DESC LIMIT 50"
+                )
+            rows = cur.fetchall()
+    return {"reflections": [dict(r) for r in rows]}
+
+
+@app.delete("/reflections/{reflection_id}", tags=["SelfRefining"])
+async def delete_reflection(reflection_id: int, token: str = Depends(verify_token)):
+    with _get_db() as db:
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE agent_reflections SET is_active = FALSE WHERE id = %s",
+                (reflection_id,),
+            )
+        db.commit()
+    return {"deleted": reflection_id}
+
+
+# ============================================================
 # GUARDRAILS
 # ============================================================
 

@@ -355,3 +355,29 @@ HTTP request → `TracingContextMiddleware` (creates root span, injects trace_id
 - Grafana: http://localhost:3001 (anonymous admin)
 - Jaeger UI: http://localhost:16686
 - Prometheus: http://localhost:9090
+
+---
+
+## Implemented: Self-Evaluating & Self-Refining Agent System (Session 7)
+
+### What was added
+- `api/evaluation.py`: LLM-as-judge (gpt-4.1-mini) scores every agent output 0–10 across quality, completeness, guardrails, task_success rubrics. Returns structured EvalResult. Guarded by SELF_EVAL_ENABLED env var.
+- `api/reflection.py`: ReflectionEngine generates verbal lessons from failures (Reflexion framework, Shinn et al. NeurIPS 2023). Lessons injected into future agent calls as few-shot context. Persisted in agent_reflections table.
+- `api/prompt_manager.py`: PromptManager stores versioned system prompts per agent in prompt_versions table. Routes AB_TEST_SPLIT% of traffic to candidate variants. One-command rollback via POST /prompts/{agent}/rollback.
+- `api/refiner.py`: arq cron job (every 6h) clusters failure patterns, proposes improved prompt candidates via gpt-4.1, writes them to prompt_versions as 'candidate'. Auto-promotes if candidate scores beat active.
+- `db/schema.sql`: 4 new tables — agent_outcomes, agent_reflections, prompt_versions, eval_runs.
+- `api/worker.py`: All 14 job functions fire-and-forget evaluation via run_evaluate_outcome job. Reflections injected at job start when SELF_EVAL_ENABLED=true.
+- `api/main.py`: 7 new endpoints — GET/POST /prompts, GET /outcomes, GET /outcomes/stats, GET /reflections, DELETE /reflections/{id}.
+- `dashboard/index.html`: "Agent Self-Improvement" panel with prompt version table, one-click rollback, pass rate bars, reflections feed.
+
+### The Self-Refinement Loop
+1. Agent executes → EvaluationAgent scores output → stored in agent_outcomes
+2. Score below threshold → ReflectionEngine generates verbal lesson → stored in agent_reflections
+3. Next call of same agent → reflection injected as few-shot context → improved output
+4. Every 6h: PromptRefiner clusters failures → proposes candidate prompt → A/B tested on 10% traffic
+5. Candidate beats active → promoted; loser archived for rollback
+
+### Feature flags
+SELF_EVAL_ENABLED=false (default) — enables evaluation + reflection injection
+PROMPT_REFINE_ENABLED=false (default) — enables autonomous refinement cron
+AB_TEST_SPLIT=10 — percentage of traffic to candidate variant

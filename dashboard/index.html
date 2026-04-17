@@ -294,6 +294,131 @@
     }
     /* ===== END LLM COST & LATENCY PANEL ===== */
 
+    /* ===== AGENT SELF-IMPROVEMENT PANEL ===== */
+    .si-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .si-panel-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .si-panel-header .panel-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .si-panel-header .panel-dot.ok { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .si-panel-header .panel-dot.mock { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+    .si-panel-header .panel-title { font-size: 15px; font-weight: 700; }
+    .si-panel-header .panel-updated { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+    .si-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+    .si-table thead { background: rgba(255,255,255,0.03); }
+    .si-table th {
+      text-align: left; padding: 10px 12px; font-weight: 500;
+      color: var(--muted); font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.05em; border-bottom: 1px solid var(--border);
+    }
+    .si-table td {
+      padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--text);
+    }
+    .si-table tr:last-child td { border-bottom: none; }
+    .si-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .si-score-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 20px;
+      font-size: 11px; font-weight: 700;
+    }
+    .si-score-badge.green  { background: rgba(16,185,129,.2); color: #10b981; }
+    .si-score-badge.amber  { background: rgba(245,158,11,.2); color: #f59e0b; }
+    .si-score-badge.red    { background: rgba(239,68,68,.2); color: #ef4444; }
+
+    .si-passrate-bar {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .si-passrate-track {
+      width: 80px; height: 8px; background: var(--border);
+      border-radius: 4px; overflow: hidden;
+    }
+    .si-passrate-fill {
+      height: 100%; border-radius: 4px; transition: width 0.4s;
+    }
+
+    .si-btn-rollback {
+      padding: 4px 10px; border: 1px solid rgba(239,68,68,0.3);
+      background: rgba(239,68,68,0.15); color: #ef4444; border-radius: 5px;
+      font-size: 11px; font-weight: 600; cursor: pointer; transition: opacity 0.15s;
+    }
+    .si-btn-rollback:hover { opacity: 0.75; }
+
+    .si-reflections-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px; margin-top: 16px;
+    }
+    .si-reflection-card {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .si-reflection-header {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .si-chip {
+      display: inline-block; padding: 1px 7px; border-radius: 20px;
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .si-chip.type-incomplete     { background: rgba(245,158,11,.2); color: #f59e0b; }
+    .si-chip.type-hallucination  { background: rgba(239,68,68,.2); color: #ef4444; }
+    .si-chip.type-guardrail_breach { background: rgba(239,68,68,.25); color: #f87171; }
+    .si-chip.type-off_task       { background: rgba(99,102,241,.2); color: #a5b4fc; }
+    .si-chip.type-general        { background: rgba(148,163,184,.15); color: #94a3b8; }
+
+    .si-reflection-text {
+      font-size: 12px; color: var(--muted); line-height: 1.5;
+    }
+    .si-btn-dismiss {
+      padding: 3px 8px; border: 1px solid var(--border);
+      background: transparent; color: var(--muted); border-radius: 4px;
+      font-size: 10px; cursor: pointer; align-self: flex-start;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .si-btn-dismiss:hover { border-color: var(--danger); color: var(--danger); }
+
+    .si-section-label {
+      font-size: 12px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted); margin: 16px 0 8px 0;
+    }
+
+    /* Toast notifications */
+    .si-toast-container {
+      position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .si-toast {
+      padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+      color: #fff; animation: si-toast-in 0.25s ease-out;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
+    .si-toast.success { background: #10b981; }
+    .si-toast.error   { background: #ef4444; }
+    @keyframes si-toast-in {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    /* ===== END AGENT SELF-IMPROVEMENT PANEL ===== */
+
     /* KPI CARDS */
     .kpi-grid {
       display: grid;
@@ -680,6 +805,43 @@
   </div>
 
   <!-- ============================================================ -->
+  <!-- AGENT SELF-IMPROVEMENT PANEL -->
+  <!-- ============================================================ -->
+  <div class="si-panel" id="selfImprovementPanel">
+    <div class="si-panel-header">
+      <div class="panel-dot mock" id="si-status-dot"></div>
+      <span class="panel-title">Agent Self-Improvement</span>
+      <span class="panel-updated" id="si-updated">—</span>
+    </div>
+
+    <!-- Prompt Versions Table -->
+    <table class="si-table" id="si-prompts-table">
+      <thead>
+        <tr>
+          <th>Agent</th>
+          <th>Active Version</th>
+          <th>Avg Score</th>
+          <th>Samples</th>
+          <th>24h Pass Rate</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="si-prompts-body">
+        <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Loading...</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Reflections Feed -->
+    <div class="si-section-label">Recent Reflections</div>
+    <div class="si-reflections-grid" id="si-reflections-grid">
+      <div style="color:var(--muted);font-size:13px;">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Toast container -->
+  <div class="si-toast-container" id="si-toast-container"></div>
+
+  <!-- ============================================================ -->
   <!-- KPIs -->
   <!-- ============================================================ -->
 
@@ -827,6 +989,7 @@
   let lastHealthData = null;
   let metricsCharts = { cost: null, p99: null };
   let metricsInterval = null;
+  let siInterval = null;
 
   // ============================================================
   // MOCK METRICS DATA (when API not connected)
@@ -844,6 +1007,161 @@
       }
     }
   };
+
+  // ============================================================
+  // MOCK SELF-IMPROVEMENT DATA
+  // ============================================================
+  const MOCK_SELF_IMPROVEMENT = {
+    prompts: [
+      {agent:"talent", version:"1.2.0", score_avg:8.1, sample_count:47},
+      {agent:"scheduling", version:"1.1.0", score_avg:7.8, sample_count:31},
+      {agent:"onboarding", version:"1.0.0", score_avg:7.2, sample_count:18},
+      {agent:"performance", version:"1.1.0", score_avg:7.5, sample_count:22},
+      {agent:"knowledge", version:"1.0.0", score_avg:6.9, sample_count:14},
+      {agent:"route", version:"1.0.0", score_avg:8.4, sample_count:89},
+    ],
+    stats: [
+      {agent:"talent", pass_rate_pct:87, avg_score:8.1, total:47},
+      {agent:"scheduling", pass_rate_pct:84, avg_score:7.8, total:31},
+      {agent:"onboarding", pass_rate_pct:78, avg_score:7.2, total:18},
+      {agent:"performance", pass_rate_pct:82, avg_score:7.5, total:22},
+      {agent:"knowledge", pass_rate_pct:71, avg_score:6.9, total:14},
+      {agent:"route", pass_rate_pct:94, avg_score:8.4, total:89},
+    ],
+    reflections: [
+      {id:1, agent:"onboarding", failure_type:"incomplete", reflection:"The agent failed to include department-specific onboarding steps. Next time: always ask for department before generating checklist.", created_at:"2026-04-17T07:30:00Z"},
+      {id:2, agent:"performance", failure_type:"hallucination", reflection:"Agent fabricated specific KPI numbers not present in input. Next time: only reference metrics explicitly provided.", created_at:"2026-04-17T06:45:00Z"},
+    ]
+  };
+
+  // ============================================================
+  // SELF-IMPROVEMENT PANEL
+  // ============================================================
+
+  function siShowToast(message, type) {
+    var container = document.getElementById('si-toast-container');
+    var toast = document.createElement('div');
+    toast.className = 'si-toast ' + type;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(function() { toast.remove(); }, 3000);
+  }
+
+  function siScoreBadgeClass(score) {
+    if (score >= 7) return 'green';
+    if (score >= 5) return 'amber';
+    return 'red';
+  }
+
+  function siPassRateColor(pct) {
+    if (pct >= 80) return '#10b981';
+    if (pct >= 60) return '#f59e0b';
+    return '#ef4444';
+  }
+
+  function siFailureTypeClass(ft) {
+    if (!ft) return 'type-general';
+    return 'type-' + ft;
+  }
+
+  async function siRollback(agent) {
+    if (!confirm('Roll back ' + agent + ' prompt to previous version?')) return;
+    var data = await apiFetch('/prompts/' + agent + '/rollback', { method: 'POST' });
+    if (data && data.rolled_back_to) {
+      siShowToast('Rolled back ' + agent + ' to ' + data.rolled_back_to, 'success');
+      loadSelfImprovementPanel();
+    } else {
+      siShowToast('Rollback failed for ' + agent, 'error');
+    }
+  }
+
+  async function siDismissReflection(id) {
+    var data = await apiFetch('/reflections/' + id, { method: 'DELETE' });
+    if (data && data.deleted) {
+      siShowToast('Reflection dismissed', 'success');
+      loadSelfImprovementPanel();
+    } else {
+      siShowToast('Failed to dismiss reflection', 'error');
+    }
+  }
+
+  function renderSelfImprovementPanel(prompts, stats, reflections, isLive) {
+    var dot = document.getElementById('si-status-dot');
+    dot.className = 'panel-dot ' + (isLive ? 'ok' : 'mock');
+    document.getElementById('si-updated').textContent =
+      'Last updated: ' + new Date().toLocaleTimeString();
+
+    // Build a lookup for stats by agent
+    var statsMap = {};
+    (stats || []).forEach(function(s) { statsMap[s.agent] = s; });
+
+    // Render prompts table
+    var tbody = document.getElementById('si-prompts-body');
+    if (!prompts || prompts.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">No prompt data available.</td></tr>';
+    } else {
+      tbody.innerHTML = prompts.map(function(p) {
+        var sc = p.score_avg || 0;
+        var stat = statsMap[p.agent] || {};
+        var pr = stat.pass_rate_pct || 0;
+        var prColor = siPassRateColor(pr);
+        return '<tr>' +
+          '<td><span class="agent-tag">' + p.agent + '</span></td>' +
+          '<td>' + (p.version || '—') + '</td>' +
+          '<td><span class="si-score-badge ' + siScoreBadgeClass(sc) + '">' + sc.toFixed(1) + '</span></td>' +
+          '<td>' + (p.sample_count || 0) + '</td>' +
+          '<td><div class="si-passrate-bar">' +
+            '<div class="si-passrate-track"><div class="si-passrate-fill" style="width:' + pr + '%;background:' + prColor + ';"></div></div>' +
+            '<span style="font-size:12px;color:var(--muted);">' + pr + '%</span>' +
+          '</div></td>' +
+          '<td><button class="si-btn-rollback" onclick="siRollback(\'' + p.agent + '\')">Rollback</button></td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    // Render reflections
+    var grid = document.getElementById('si-reflections-grid');
+    if (!reflections || reflections.length === 0) {
+      grid.innerHTML = '<div style="color:var(--muted);font-size:13px;">No active reflections.</div>';
+    } else {
+      grid.innerHTML = reflections.slice(0, 5).map(function(r) {
+        var ft = r.failure_type || 'general';
+        var truncated = (r.reflection || '').length > 120
+          ? r.reflection.substring(0, 120) + '...'
+          : (r.reflection || '');
+        return '<div class="si-reflection-card">' +
+          '<div class="si-reflection-header">' +
+            '<span class="agent-tag">' + r.agent + '</span>' +
+            '<span class="si-chip ' + siFailureTypeClass(ft) + '">' + ft + '</span>' +
+          '</div>' +
+          '<div class="si-reflection-text">' + truncated + '</div>' +
+          '<button class="si-btn-dismiss" onclick="siDismissReflection(' + r.id + ')">Dismiss</button>' +
+        '</div>';
+      }).join('');
+    }
+  }
+
+  async function loadSelfImprovementPanel() {
+    var prompts = await apiFetch('/prompts');
+    var stats = await apiFetch('/outcomes/stats');
+    var reflections = await apiFetch('/reflections');
+
+    if (prompts && prompts.prompts) {
+      renderSelfImprovementPanel(
+        prompts.prompts,
+        stats ? stats.stats : [],
+        reflections ? reflections.reflections : [],
+        true
+      );
+    } else {
+      renderSelfImprovementPanel(
+        MOCK_SELF_IMPROVEMENT.prompts,
+        MOCK_SELF_IMPROVEMENT.stats,
+        MOCK_SELF_IMPROVEMENT.reflections,
+        false
+      );
+    }
+  }
 
   // ============================================================
   // METRICS PANEL — LLM Cost & Latency
@@ -1403,10 +1721,11 @@
     getConfig();
     document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
 
-    // Run health check, KPI load, and metrics in parallel
+    // Run health check, KPI load, metrics, and self-improvement in parallel
     const [healthData] = await Promise.all([
       fetchAndRenderHealth(),
       loadMetricsPanel(),
+      loadSelfImprovementPanel(),
     ]);
 
     // Load KPI + chart data (live API when connected, mock otherwise)
@@ -1423,16 +1742,19 @@
       clearInterval(autoRefreshInterval);
       clearInterval(healthRefreshInterval);
       clearInterval(metricsInterval);
+      clearInterval(siInterval);
       autoRefreshInterval = null;
       healthRefreshInterval = null;
       metricsInterval = null;
+      siInterval = null;
       document.getElementById('auto-refresh-label').textContent = 'OFF';
     } else {
-      // KPIs refresh every 30s; health refreshes independently every 15s; metrics every 60s
+      // KPIs refresh every 30s; health every 15s; metrics every 60s; self-improvement every 120s
       autoRefreshInterval   = setInterval(loadDashboard, 30000);
       healthRefreshInterval = setInterval(fetchAndRenderHealth, 15000);
       metricsInterval       = setInterval(loadMetricsPanel, 60000);
-      document.getElementById('auto-refresh-label').textContent = 'ON (30s / 15s health / 60s metrics)';
+      siInterval            = setInterval(loadSelfImprovementPanel, 120000);
+      document.getElementById('auto-refresh-label').textContent = 'ON (30s / 15s health / 60s metrics / 120s self-improve)';
     }
   }
 

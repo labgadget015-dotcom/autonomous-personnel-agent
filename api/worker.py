@@ -6,9 +6,9 @@ preventing HTTP gateway timeouts (30s) on multi-hop LLM chains that can
 take 5–15 seconds per call.
 
 Architecture:
-  1. API receives request → enqueues job → returns {job_id, status: "queued"}
-  2. Worker picks up job → runs agent → stores result in Redis (TTL 1 hour)
-  3. Caller polls GET /jobs/{job_id} → receives status + result when complete
+  1. API receives request -> enqueues job -> returns {job_id, status: "queued"}
+  2. Worker picks up job -> runs agent -> stores result in Redis (TTL 1 hour)
+  3. Caller polls GET /jobs/{job_id} -> receives status + result when complete
 
 Usage:
   Start the worker alongside the API:
@@ -30,13 +30,19 @@ Job functions exposed (one per long-running agent action):
   - run_knowledge_answer
   - run_knowledge_generate
   - run_route
+  - run_evaluate_outcome    (self-eval: scores agent output)
+  - run_prompt_refiner      (cron: refines prompts every 6h)
 """
 
+import json
 import os
 import logging
 from typing import Any, Dict, List, Optional
 
+import psycopg2
+import psycopg2.extras
 from arq.connections import RedisSettings
+from arq.cron import cron
 
 logger = logging.getLogger("personnel-agent.worker")
 
@@ -47,6 +53,15 @@ try:
 except ImportError:
     from telemetry import _NoOpTracer  # type: ignore
     _tracer = _NoOpTracer()
+
+# Helper to get current trace ID (safe if OTel not available)
+def _current_trace_id() -> str:
+    try:
+        from telemetry import current_trace_id
+        return current_trace_id()
+    except Exception:
+        return ""
+
 
 # ============================================================
 # Redis configuration
@@ -66,6 +81,71 @@ def _redis_settings() -> RedisSettings:
         )
     except Exception:
         return RedisSettings(host="localhost", port=6379)
+
+
+# ============================================================
+# DB helper for self-eval system
+# ============================================================
+
+def _get_worker_db():
+    """Create a psycopg2 connection for the worker (self-eval system)."""
+    database_url = os.getenv(
+        "DATABASE_URL",
+        "postgresql://agent:agent@localhost:5432/personnel_agent",
+    )
+    try:
+        conn = psycopg2.connect(database_url, connect_timeout=5)
+        conn.autocommit = False
+        return conn
+    except Exception as exc:
+        logger.warning("Worker DB connection failed: %s", exc)
+        return None
+
+
+def _self_eval_enabled() -> bool:
+    return os.getenv("SELF_EVAL_ENABLED", "false").lower() == "true"
+
+
+# ============================================================
+# Self-eval helpers: inject reflections + fire-and-forget eval
+# ============================================================
+
+def _inject_reflections(agent: str, db_conn) -> str:
+    """Load active reflections for the agent. Returns prefix string."""
+    if not _self_eval_enabled() or db_conn is None:
+        return ""
+    try:
+        from api.reflection import get_active_reflections, increment_applied_count
+        prefix = get_active_reflections(agent, db_conn)
+        if prefix:
+            increment_applied_count(agent, db_conn)
+        return prefix
+    except Exception as exc:
+        logger.warning("Reflection injection failed for %s: %s", agent, exc)
+        return ""
+
+
+async def _enqueue_eval(ctx, agent: str, user_input, agent_output, prompt_version: str, request_id: str):
+    """Fire-and-forget: enqueue an evaluation job. Never blocks the main result."""
+    if not _self_eval_enabled():
+        return
+    try:
+        pool = ctx.get("arq_pool")
+        if pool is None:
+            # Try to use the arq pool from the worker context
+            from arq import create_pool
+            pool = await create_pool(_redis_settings())
+        await pool.enqueue_job(
+            "run_evaluate_outcome",
+            agent=agent,
+            user_input=user_input,
+            agent_output=agent_output,
+            prompt_version=prompt_version,
+            trace_id=_current_trace_id(),
+            request_id=request_id,
+        )
+    except Exception:
+        pass  # never block the main result
 
 
 # ============================================================
@@ -97,11 +177,21 @@ async def startup(ctx: Dict[str, Any]) -> None:
     ctx["knowledge"]    = KnowledgeAgent(
         vectorstore_path=os.getenv("KNOWLEDGE_VECTORSTORE_PATH")
     )
+
+    # Self-eval: create shared DB connection and arq pool reference
+    ctx["db"] = _get_worker_db()
+
     logger.info("arq worker ready — all agents initialised")
 
 
 async def shutdown(ctx: Dict[str, Any]) -> None:
     logger.info("arq worker shutting down")
+    db = ctx.get("db")
+    if db:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -118,8 +208,17 @@ async def run_route(ctx: Dict[str, Any], payload: Dict[str, Any],
         span.set_attribute("request_id", job_request_id)
         import structlog
         structlog.contextvars.bind_contextvars(request_id=job_request_id, agent="orchestrator")
+
+        # Self-refining: inject reflections
+        prompt_version = "1.0.0"
+        _inject_reflections("route", ctx.get("db"))
+
         result = ctx["orchestrator"].route(payload)
         result["request_id"] = job_request_id
+
+        # Self-refining: fire-and-forget evaluation
+        await _enqueue_eval(ctx, "route", payload, result, prompt_version, job_request_id)
+
     return result
 
 
@@ -140,7 +239,15 @@ async def run_talent_screen(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
-        return ctx["talent"].screen_candidate(candidate_profile, role, history)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("talent", ctx.get("db"))
+
+        result = ctx["talent"].screen_candidate(candidate_profile, role, history)
+
+        await _enqueue_eval(ctx, "talent", {"candidate_profile": candidate_profile, "role": role}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 async def run_talent_outreach(
@@ -156,7 +263,15 @@ async def run_talent_outreach(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
-        return ctx["talent"].draft_outreach(candidate, role, tone)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("talent", ctx.get("db"))
+
+        result = ctx["talent"].draft_outreach(candidate, role, tone)
+
+        await _enqueue_eval(ctx, "talent", {"candidate": candidate, "role": role, "tone": tone}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 async def run_talent_pipeline_summary(
@@ -170,7 +285,15 @@ async def run_talent_pipeline_summary(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
-        return ctx["talent"].build_pipeline_summary(pipeline_data)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("talent", ctx.get("db"))
+
+        result = ctx["talent"].build_pipeline_summary(pipeline_data)
+
+        await _enqueue_eval(ctx, "talent", {"pipeline_data": pipeline_data}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 # ============================================================
@@ -190,7 +313,15 @@ async def run_scheduling_summarise(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
-        return ctx["scheduling"].summarise_meeting(meeting_notes, attendees, context)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("scheduling", ctx.get("db"))
+
+        result = ctx["scheduling"].summarise_meeting(meeting_notes, attendees, context)
+
+        await _enqueue_eval(ctx, "scheduling", {"meeting_notes": meeting_notes, "attendees": attendees}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 async def run_scheduling_followups(
@@ -205,7 +336,15 @@ async def run_scheduling_followups(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
-        return ctx["scheduling"].identify_cold_followups(people, threshold_days)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("scheduling", ctx.get("db"))
+
+        result = ctx["scheduling"].identify_cold_followups(people, threshold_days)
+
+        await _enqueue_eval(ctx, "scheduling", {"people": people, "threshold_days": threshold_days}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 async def run_scheduling_invite(
@@ -222,7 +361,15 @@ async def run_scheduling_invite(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
-        return ctx["scheduling"].draft_meeting_invite(purpose, attendees, duration_minutes, context)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("scheduling", ctx.get("db"))
+
+        result = ctx["scheduling"].draft_meeting_invite(purpose, attendees, duration_minutes, context)
+
+        await _enqueue_eval(ctx, "scheduling", {"purpose": purpose, "attendees": attendees}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 # ============================================================
@@ -243,7 +390,15 @@ async def run_onboarding_plan(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
-        return ctx["onboarding"].generate_onboarding_plan(person, role, tools, company_links)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("onboarding", ctx.get("db"))
+
+        result = ctx["onboarding"].generate_onboarding_plan(person, role, tools, company_links)
+
+        await _enqueue_eval(ctx, "onboarding", {"person": person, "role": role, "tools": tools}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 async def run_onboarding_check(
@@ -258,7 +413,15 @@ async def run_onboarding_check(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
-        return ctx["onboarding"].check_onboarding_progress(plan, days_since_start)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("onboarding", ctx.get("db"))
+
+        result = ctx["onboarding"].check_onboarding_progress(plan, days_since_start)
+
+        await _enqueue_eval(ctx, "onboarding", {"plan": plan, "days_since_start": days_since_start}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 async def run_onboarding_offboarding(
@@ -275,7 +438,15 @@ async def run_onboarding_offboarding(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
-        return ctx["onboarding"].generate_offboarding_plan(person, reason, last_day, access_to_revoke)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("onboarding", ctx.get("db"))
+
+        result = ctx["onboarding"].generate_offboarding_plan(person, reason, last_day, access_to_revoke)
+
+        await _enqueue_eval(ctx, "onboarding", {"person": person, "reason": reason}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 # ============================================================
@@ -296,7 +467,15 @@ async def run_performance_brief(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="performance")
-        return ctx["performance"].generate_weekly_brief(people, goals, recent_interactions, github_activity)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("performance", ctx.get("db"))
+
+        result = ctx["performance"].generate_weekly_brief(people, goals, recent_interactions, github_activity)
+
+        await _enqueue_eval(ctx, "performance", {"people": people, "goals": goals}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 async def run_performance_goal_risk(
@@ -312,7 +491,15 @@ async def run_performance_goal_risk(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="performance")
-        return ctx["performance"].assess_goal_risk(goal, person, interactions)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("performance", ctx.get("db"))
+
+        result = ctx["performance"].assess_goal_risk(goal, person, interactions)
+
+        await _enqueue_eval(ctx, "performance", {"goal": goal, "person": person}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 # ============================================================
@@ -331,7 +518,15 @@ async def run_knowledge_answer(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="knowledge")
-        return ctx["knowledge"].answer_policy_question(question, raw_docs)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("knowledge", ctx.get("db"))
+
+        result = ctx["knowledge"].answer_policy_question(question, raw_docs)
+
+        await _enqueue_eval(ctx, "knowledge", {"question": question}, result, prompt_version, _request_id or "")
+
+    return result
 
 
 async def run_knowledge_generate(
@@ -346,7 +541,104 @@ async def run_knowledge_generate(
             span.set_attribute("request_id", _request_id)
             import structlog
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="knowledge")
-        return ctx["knowledge"].generate_document(doc_type, context)
+
+        prompt_version = "1.0.0"
+        _inject_reflections("knowledge", ctx.get("db"))
+
+        result = ctx["knowledge"].generate_document(doc_type, context)
+
+        await _enqueue_eval(ctx, "knowledge", {"doc_type": doc_type, "context": context}, result, prompt_version, _request_id or "")
+
+    return result
+
+
+# ============================================================
+# Self-Eval Job: evaluate agent output and store result
+# ============================================================
+
+async def run_evaluate_outcome(
+    ctx: Dict[str, Any],
+    agent: str,
+    user_input: dict,
+    agent_output: dict,
+    prompt_version: str = "1.0.0",
+    trace_id: str = "",
+    request_id: str = "",
+) -> dict:
+    """Evaluate a completed agent output and store result + reflection if needed."""
+    import structlog
+    from api.evaluation import evaluate_output
+    from api.reflection import generate_reflection
+    log = structlog.get_logger()
+
+    eval_result = await evaluate_output(
+        agent=agent,
+        user_input=user_input,
+        agent_output=agent_output,
+        prompt_version=prompt_version,
+    )
+
+    db = ctx.get("db")
+    if db:
+        try:
+            with db.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO agent_outcomes
+                       (agent, trace_id, request_id, input_hash, score, passed, critique,
+                        rubric_scores, prompt_version, model)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (agent, trace_id, request_id, eval_result.input_hash,
+                     eval_result.score, eval_result.passed, eval_result.critique,
+                     json.dumps(eval_result.rubric), prompt_version, "gpt-4.1-mini"),
+                )
+            db.commit()
+        except Exception as exc:
+            log.warning("eval_outcome_write_failed", agent=agent, error=str(exc))
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        # Generate reflection if failed
+        if not eval_result.passed:
+            try:
+                reflection = await generate_reflection(
+                    agent=agent,
+                    score=eval_result.score,
+                    critique=eval_result.critique,
+                    failure_type=eval_result.failure_type,
+                    input_summary=str(user_input)[:300],
+                    output_summary=str(agent_output)[:300],
+                )
+                with db.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO agent_reflections (agent, context_hash, reflection, failure_type)
+                           VALUES (%s,%s,%s,%s)""",
+                        (agent, eval_result.input_hash, reflection, eval_result.failure_type),
+                    )
+                db.commit()
+            except Exception as exc:
+                log.warning("eval_reflection_write_failed", agent=agent, error=str(exc))
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+    log.info(
+        "eval_complete",
+        agent=agent,
+        score=eval_result.score,
+        passed=eval_result.passed,
+        failure_type=eval_result.failure_type,
+    )
+    return {"score": eval_result.score, "passed": eval_result.passed}
+
+
+# ============================================================
+# Prompt Refiner (imported from api.refiner, registered as cron)
+# ============================================================
+
+from api.refiner import run_prompt_refiner
 
 
 # ============================================================
@@ -375,6 +667,13 @@ class WorkerSettings:
         run_performance_goal_risk,
         run_knowledge_answer,
         run_knowledge_generate,
+        run_evaluate_outcome,
+        run_prompt_refiner,
+    ]
+
+    # Cron jobs: prompt refiner runs every 6h
+    cron_jobs = [
+        cron(run_prompt_refiner, hour={0, 6, 12, 18}, minute=0),
     ]
 
     # Lifecycle hooks

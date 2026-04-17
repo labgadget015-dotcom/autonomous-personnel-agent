@@ -7,11 +7,19 @@
 #   docker compose up -d
 #   docker compose logs -f api
 #
+# To use the pre-built GHCR image instead of building locally:
+#   API_IMAGE=ghcr.io/labgadget015-dotcom/autonomous-personnel-agent:latest \
+#   docker compose up -d
+#
+# Health endpoints:
+#   GET /health       — deep check (Postgres, LLM, env, disk)
+#   GET /health/live  — liveness probe (no external calls, always fast)
+#
 # Services:
 #   postgres  → localhost:5432
 #   api       → localhost:8000  (FastAPI + Swagger UI at /docs)
 #   n8n       → localhost:5678  (n8n editor)
-#   dashboard → http://localhost:8000/dashboard (static redirect)
+#   dashboard → localhost:3000  (monitoring dashboard)
 #
 # Stop:  docker compose down
 # Reset: docker compose down -v  (⚠ deletes all data)
@@ -57,8 +65,11 @@ services:
 
   # ----------------------------------------------------------
   # FASTAPI SERVICE — Orchestrator + 5 sub-agents
+  # Set API_IMAGE env var to pull from GHCR instead of building:
+  #   API_IMAGE=ghcr.io/labgadget015-dotcom/autonomous-personnel-agent:latest
   # ----------------------------------------------------------
   api:
+    image: ${API_IMAGE:-}
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -93,9 +104,11 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
-      interval: 30s
-      timeout: 10s
+      # /health/live: no external I/O — fast liveness probe
+      # Use GET /health for deep readiness checks from monitoring tools
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
       retries: 5
       start_period: 30s
     networks:

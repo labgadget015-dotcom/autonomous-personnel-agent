@@ -18,7 +18,8 @@ Endpoints:
   POST /knowledge/generate   — Generate an internal document
   POST /guardrails/evaluate  — Run guardrail checks on any text
 
-  GET  /health         — Health check
+  GET  /health         — Deep health check: Postgres, LLM client, env, disk
+  GET  /health/live    — Liveness probe (no external checks — always 200 if process runs)
   GET  /metrics        — Basic service metrics
 """
 
@@ -43,6 +44,7 @@ from agents import (
     KnowledgeAgent,
 )
 from guardrails import evaluate as guardrails_evaluate, GuardrailResult
+from health import run_health_checks
 
 # ============================================================
 # LOGGING
@@ -206,10 +208,32 @@ async def request_middleware(request: Request, call_next):
 
 @app.get("/health", tags=["System"])
 async def health():
+    """
+    Deep health check.
+    Probes: Postgres connectivity (latency), LLM client config,
+    required environment variables, and disk space.
+
+    Returns HTTP 200 (ok/degraded) or 503 (unhealthy).
+    """
+    response, http_status = run_health_checks()
+    return JSONResponse(status_code=http_status, content=response)
+
+
+@app.get("/health/live", tags=["System"])
+async def liveness():
+    """
+    Kubernetes/Docker liveness probe — never hits external services.
+    Always returns 200 as long as the process is running.
+    Use this for fast health probes in load balancers.
+    """
+    from health import _SERVICE_START_WALL, BUILD_VERSION, BUILD_SHA
     return {
         "status": "ok",
         "service": "autonomous-personnel-agent",
         "version": "1.0.0",
+        "build_version": BUILD_VERSION,
+        "build_sha": BUILD_SHA,
+        "started_at": _SERVICE_START_WALL,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

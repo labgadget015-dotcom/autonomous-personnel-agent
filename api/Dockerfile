@@ -28,9 +28,21 @@ RUN pip install --upgrade pip && \
 # ============================================================
 FROM python:3.11-slim AS production
 
+# Build-time metadata injected by CI (docker/build-push-action build-args)
+# These become environment variables readable by health.py at runtime
+ARG BUILD_VERSION=dev
+ARG BUILD_SHA=unknown
+ARG BUILD_DATE=unknown
+
+ENV BUILD_VERSION=${BUILD_VERSION} \
+    BUILD_SHA=${BUILD_SHA} \
+    BUILD_DATE=${BUILD_DATE}
+
 LABEL org.opencontainers.image.title="Personnel Agent API"
 LABEL org.opencontainers.image.description="Autonomous multi-agent personnel management — FastAPI service"
 LABEL org.opencontainers.image.source="https://github.com/labgadget015-dotcom/autonomous-personnel-agent"
+LABEL org.opencontainers.image.version=${BUILD_VERSION}
+LABEL org.opencontainers.image.revision=${BUILD_SHA}
 
 WORKDIR /app
 
@@ -60,9 +72,10 @@ USER appuser
 # Expose API port
 EXPOSE 8000
 
-# Health check — polls /health every 30s
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:8000/health || exit 1
+# Liveness probe — uses /health/live (no external I/O, always fast)
+# Deep health is available at /health for monitoring dashboards
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -sf http://localhost:8000/health/live || exit 1
 
 # Default command — 2 workers for local; override in production
 CMD ["uvicorn", "main:app", \

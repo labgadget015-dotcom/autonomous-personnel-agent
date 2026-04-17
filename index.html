@@ -207,6 +207,93 @@
 
     /* ===== END HEALTH PANEL ===== */
 
+    /* ===== LLM COST & LATENCY PANEL ===== */
+    .metrics-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .metrics-panel-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .metrics-panel-header .panel-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .metrics-panel-header .panel-dot.ok { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .metrics-panel-header .panel-dot.mock { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+    .metrics-panel-header .panel-title {
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .metrics-panel-header .panel-updated {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .metrics-kpi-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .metrics-kpi-card {
+      flex: 1 1 140px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      min-width: 140px;
+    }
+    .metrics-kpi-card .mkpi-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .metrics-kpi-card .mkpi-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .metrics-charts-row {
+      display: flex;
+      gap: 16px;
+    }
+    .metrics-chart-box {
+      flex: 1 1 300px;
+      min-width: 0;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .metrics-chart-box .mchart-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .metrics-chart-box canvas {
+      width: 100% !important;
+      max-height: 220px;
+    }
+    @media (max-width: 700px) {
+      .metrics-charts-row { flex-direction: column; }
+    }
+    /* ===== END LLM COST & LATENCY PANEL ===== */
+
     /* KPI CARDS */
     .kpi-grid {
       display: grid;
@@ -558,6 +645,41 @@
   </div>
 
   <!-- ============================================================ -->
+  <!-- LLM Cost & Latency Panel -->
+  <!-- ============================================================ -->
+  <div class="metrics-panel" id="metrics-panel">
+    <div class="metrics-panel-header">
+      <div class="panel-dot mock" id="metrics-status-dot"></div>
+      <span class="panel-title">LLM Cost &amp; Latency</span>
+      <span class="panel-updated" id="metrics-updated">—</span>
+    </div>
+    <div class="metrics-kpi-row">
+      <div class="metrics-kpi-card">
+        <div class="mkpi-label">Total Tokens</div>
+        <div class="mkpi-value" id="metrics-total-tokens">—</div>
+      </div>
+      <div class="metrics-kpi-card">
+        <div class="mkpi-label">Est. Cost</div>
+        <div class="mkpi-value" id="metrics-est-cost">—</div>
+      </div>
+      <div class="metrics-kpi-card">
+        <div class="mkpi-label">LLM Calls</div>
+        <div class="mkpi-value" id="metrics-llm-calls">—</div>
+      </div>
+    </div>
+    <div class="metrics-charts-row">
+      <div class="metrics-chart-box">
+        <div class="mchart-title">Token Cost by Agent</div>
+        <canvas id="chart-cost-by-agent"></canvas>
+      </div>
+      <div class="metrics-chart-box">
+        <div class="mchart-title">p99 Latency by Agent</div>
+        <canvas id="chart-p99-by-agent"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
   <!-- KPIs -->
   <!-- ============================================================ -->
 
@@ -703,6 +825,115 @@
   let healthRefreshInterval = null;
   let charts = {};
   let lastHealthData = null;
+  let metricsCharts = { cost: null, p99: null };
+  let metricsInterval = null;
+
+  // ============================================================
+  // MOCK METRICS DATA (when API not connected)
+  // ============================================================
+  const MOCK_METRICS = {
+    llm_cost: {
+      total_tokens: 84320, estimated_usd: 0.168, calls: 47,
+      by_agent: {
+        talent:      { tokens: 22100, estimated_usd: 0.044, p99_ms: 4200 },
+        scheduling:  { tokens: 18500, estimated_usd: 0.037, p99_ms: 3800 },
+        onboarding:  { tokens: 15200, estimated_usd: 0.030, p99_ms: 2900 },
+        performance: { tokens: 12800, estimated_usd: 0.026, p99_ms: 5100 },
+        knowledge:   { tokens: 11200, estimated_usd: 0.022, p99_ms: 3200 },
+        route:       { tokens:  4520, estimated_usd: 0.009, p99_ms: 1400 }
+      }
+    }
+  };
+
+  // ============================================================
+  // METRICS PANEL — LLM Cost & Latency
+  // ============================================================
+  async function fetchMetrics() {
+    const data = await apiFetch('/metrics');
+    return data;
+  }
+
+  function renderMetricsPanel(data, isLive) {
+    const dot = document.getElementById('metrics-status-dot');
+    dot.className = 'panel-dot ' + (isLive ? 'ok' : 'mock');
+
+    document.getElementById('metrics-updated').textContent =
+      'Last updated: ' + new Date().toLocaleTimeString();
+
+    const cost = data.llm_cost || {};
+    document.getElementById('metrics-total-tokens').textContent =
+      (cost.total_tokens || 0).toLocaleString();
+    document.getElementById('metrics-est-cost').textContent =
+      '$' + (cost.estimated_usd || 0).toFixed(4);
+    document.getElementById('metrics-llm-calls').textContent =
+      (cost.calls || 0).toLocaleString();
+
+    const byAgent = cost.by_agent || {};
+    const agents = Object.keys(byAgent);
+    const costValues = agents.map(a => byAgent[a].estimated_usd || 0);
+    const p99Values = agents.map(a => byAgent[a].p99_ms || 0);
+
+    // Destroy existing charts to prevent canvas reuse errors
+    if (metricsCharts.cost) { metricsCharts.cost.destroy(); metricsCharts.cost = null; }
+    if (metricsCharts.p99)  { metricsCharts.p99.destroy();  metricsCharts.p99 = null; }
+
+    const costCtx = document.getElementById('chart-cost-by-agent');
+    metricsCharts.cost = new Chart(costCtx, {
+      type: 'bar',
+      data: {
+        labels: agents,
+        datasets: [{
+          label: 'Cost ($USD)',
+          data: costValues,
+          backgroundColor: 'rgba(99, 102, 241, 0.8)',
+          borderRadius: 4,
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { title: { display: true, text: '$USD', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
+          y: { grid: { display: false }, ticks: { color: '#e2e8f0' } }
+        }
+      }
+    });
+
+    const p99Ctx = document.getElementById('chart-p99-by-agent');
+    metricsCharts.p99 = new Chart(p99Ctx, {
+      type: 'bar',
+      data: {
+        labels: agents,
+        datasets: [{
+          label: 'p99 Latency (ms)',
+          data: p99Values,
+          backgroundColor: 'rgba(245, 158, 11, 0.8)',
+          borderRadius: 4,
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { title: { display: true, text: 'ms', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#94a3b8' } },
+          y: { grid: { display: false }, ticks: { color: '#e2e8f0' } }
+        }
+      }
+    });
+  }
+
+  async function loadMetricsPanel() {
+    const data = await fetchMetrics();
+    if (data && data.llm_cost) {
+      renderMetricsPanel(data, true);
+    } else {
+      renderMetricsPanel(MOCK_METRICS, false);
+    }
+  }
 
   function getConfig() {
     API_URL   = document.getElementById('api-url').value.trim().replace(/\/$/, '');
@@ -1172,9 +1403,10 @@
     getConfig();
     document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
 
-    // Run health check and KPI load in parallel
+    // Run health check, KPI load, and metrics in parallel
     const [healthData] = await Promise.all([
       fetchAndRenderHealth(),
+      loadMetricsPanel(),
     ]);
 
     // Load KPI + chart data (live API when connected, mock otherwise)
@@ -1190,14 +1422,17 @@
     if (autoRefreshInterval) {
       clearInterval(autoRefreshInterval);
       clearInterval(healthRefreshInterval);
+      clearInterval(metricsInterval);
       autoRefreshInterval = null;
       healthRefreshInterval = null;
+      metricsInterval = null;
       document.getElementById('auto-refresh-label').textContent = 'OFF';
     } else {
-      // KPIs refresh every 30s; health refreshes independently every 15s
+      // KPIs refresh every 30s; health refreshes independently every 15s; metrics every 60s
       autoRefreshInterval   = setInterval(loadDashboard, 30000);
       healthRefreshInterval = setInterval(fetchAndRenderHealth, 15000);
-      document.getElementById('auto-refresh-label').textContent = 'ON (30s / 15s health)';
+      metricsInterval       = setInterval(loadMetricsPanel, 60000);
+      document.getElementById('auto-refresh-label').textContent = 'ON (30s / 15s health / 60s metrics)';
     }
   }
 

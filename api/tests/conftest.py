@@ -10,7 +10,6 @@ Provides:
 import os
 import json
 import pytest
-import psycopg2
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
@@ -43,11 +42,20 @@ def make_mock_llm_response(content: dict) -> MagicMock:
 
 @pytest.fixture(scope="session")
 def db_conn():
-    """Session-scoped psycopg2 connection to the test database."""
-    conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
-    conn.autocommit = True
+    """Session-scoped asyncpg connection to the test database.
+
+    Note: This fixture uses synchronous event loop creation for
+    compatibility with session-scoped fixtures.
+    """
+    import asyncio
+    import asyncpg
+
+    async def _connect():
+        return await asyncpg.connect(DATABASE_URL, timeout=10)
+
+    conn = asyncio.get_event_loop().run_until_complete(_connect())
     yield conn
-    conn.close()
+    asyncio.get_event_loop().run_until_complete(conn.close())
 
 
 # ─────────────────────────────────────────────────

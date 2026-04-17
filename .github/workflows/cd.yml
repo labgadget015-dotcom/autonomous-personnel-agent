@@ -7,6 +7,8 @@ on:
     paths:
       - "api/**"
       - "db/schema.sql"
+      - "alembic/**"
+      - "alembic.ini"
       - ".github/workflows/cd.yml"
 
 # Only one CD run at a time on main
@@ -307,18 +309,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r api/requirements.txt
-          pip install pytest pytest-asyncio httpx psycopg2-binary
+          pip install pytest pytest-asyncio httpx alembic asyncpg
 
-      # ---- Apply schema to test DB ----
-      - name: Apply schema migration
+      # ---- Run Alembic migrations to set up test DB ----
+      - name: Run database migrations
+        env:
+          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/personnel_agent_test
         run: |
-          echo "Applying db/schema.sql to test database..."
-          PGPASSWORD=testpass psql \
-            -h localhost \
-            -U testuser \
-            -d personnel_agent_test \
-            -f db/schema.sql
-          echo "Schema applied."
+          echo "Running Alembic migrations..."
+          python -m alembic -c alembic.ini upgrade head
+          echo "Migrations applied."
 
       # ---- Verify schema objects exist ----
       - name: Verify schema objects
@@ -383,8 +383,8 @@ jobs:
           fi
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Database:** PostgreSQL 16 (ephemeral, test-only)" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Schema:** Applied from \`db/schema.sql\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Test files:** \`api/tests/test_schema.py\`, \`api/tests/test_endpoints.py\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Schema:** Applied via Alembic migrations" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Test files:** \`api/tests/test_endpoints.py\`, \`api/tests/test_self_refining.py\`" >> "$GITHUB_STEP_SUMMARY"
 
       # ---- Stop API server ----
       - name: Stop API server

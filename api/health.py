@@ -63,9 +63,9 @@ RECOMMENDED_ENV_VARS = [
 ]
 
 
-def _check_postgres() -> Dict[str, Any]:
+async def _check_postgres() -> Dict[str, Any]:
     """
-    Connect to Postgres, run SELECT 1, measure round-trip latency.
+    Probe Postgres using asyncpg directly (no psycopg2).
     Returns a check dict with status, latency_ms, and detail.
     """
     database_url = os.getenv("DATABASE_URL")
@@ -77,20 +77,16 @@ def _check_postgres() -> Dict[str, Any]:
         }
 
     try:
-        import psycopg2  # type: ignore[import]
+        import asyncpg
 
         t0 = time.monotonic()
-        conn = psycopg2.connect(database_url, connect_timeout=5)
+        conn = await asyncpg.connect(database_url, timeout=5)
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-                # Also get Postgres server version for extra detail
-                cur.execute("SELECT version()")
-                pg_version_row = cur.fetchone()
-                pg_version = pg_version_row[0].split(",")[0] if pg_version_row else "unknown"
+            await conn.fetchval("SELECT 1")
+            pg_version_row = await conn.fetchval("SELECT version()")
+            pg_version = pg_version_row.split(",")[0] if pg_version_row else "unknown"
         finally:
-            conn.close()
+            await conn.close()
 
         latency_ms = round((time.monotonic() - t0) * 1000, 2)
         return {
@@ -103,14 +99,14 @@ def _check_postgres() -> Dict[str, Any]:
         return {
             "status": "warn",
             "latency_ms": None,
-            "detail": "psycopg2 not installed — install psycopg2-binary to enable DB checks",
+            "detail": "asyncpg not installed — install asyncpg to enable DB checks",
         }
     except Exception as exc:
         logger.warning("Postgres health check failed: %s", exc)
         return {
             "status": "fail",
             "latency_ms": None,
-            "detail": str(exc),
+            "detail": str(exc)[:120],
         }
 
 
@@ -273,7 +269,7 @@ def _check_disk() -> Dict[str, Any]:
         }
 
 
-def run_health_checks(include_postgres: bool = True) -> Tuple[Dict[str, Any], int]:
+async def run_health_checks(include_postgres: bool = True) -> Tuple[Dict[str, Any], int]:
     """
     Run all health checks and return (response_body, http_status_code).
 
@@ -293,7 +289,7 @@ def run_health_checks(include_postgres: bool = True) -> Tuple[Dict[str, Any], in
     checks["disk"]        = _check_disk()
 
     if include_postgres:
-        checks["postgres"] = _check_postgres()
+        checks["postgres"] = await _check_postgres()
     else:
         checks["postgres"] = {"status": "skip", "detail": "Skipped (no DATABASE_URL)"}
 

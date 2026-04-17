@@ -5,7 +5,7 @@ into future agent calls as few-shot context.
 Implements a simplified Reflexion framework (Shinn et al., NeurIPS 2023):
   Actor -> Evaluator -> Self-Reflection -> Actor (next call)
 
-DB operations use psycopg2 (sync) matching the existing codebase pattern.
+DB operations use SQLAlchemy async sessions matching the async codebase pattern.
 Guarded by SELF_EVAL_ENABLED env var.
 """
 import os
@@ -13,6 +13,7 @@ import os
 import structlog
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
+from sqlalchemy import text
 
 log = structlog.get_logger()
 
@@ -64,28 +65,26 @@ async def generate_reflection(
     return result.content
 
 
-def get_active_reflections(agent: str, db_conn, limit: int = 3) -> str:
+async def get_active_reflections(agent: str, session, limit: int = 3) -> str:
     """Retrieve top-N active reflections for an agent, formatted for prompt injection.
 
-    Uses psycopg2 cursor (sync) matching the existing codebase pattern.
-    db_conn should be a psycopg2 connection object.
+    Uses SQLAlchemy AsyncSession.
     """
     if os.getenv("SELF_EVAL_ENABLED", "false").lower() != "true":
         return ""
 
-    if db_conn is None:
+    if session is None:
         return ""
 
     try:
-        with db_conn.cursor() as cur:
-            cur.execute(
-                """SELECT reflection FROM agent_reflections
-                   WHERE agent = %s AND is_active = TRUE
-                   ORDER BY applied_count ASC, created_at DESC
-                   LIMIT %s""",
-                (agent, limit),
-            )
-            rows = cur.fetchall()
+        result = await session.execute(
+            text("""SELECT reflection FROM agent_reflections
+                    WHERE agent = :agent AND is_active = TRUE
+                    ORDER BY applied_count ASC, created_at DESC
+                    LIMIT :limit"""),
+            {"agent": agent, "limit": limit},
+        )
+        rows = result.fetchall()
     except Exception as exc:
         log.warning("reflection_fetch_failed", agent=agent, error=str(exc))
         return ""
@@ -99,21 +98,19 @@ def get_active_reflections(agent: str, db_conn, limit: int = 3) -> str:
     return INJECTION_PREFIX.format(n=len(rows), agent=agent, reflections=reflection_text)
 
 
-def increment_applied_count(agent: str, db_conn) -> None:
+async def increment_applied_count(agent: str, session) -> None:
     """Bump applied_count for all active reflections of this agent.
 
-    Uses psycopg2 cursor (sync).
+    Uses SQLAlchemy AsyncSession.
     """
-    if db_conn is None:
+    if session is None:
         return
 
     try:
-        with db_conn.cursor() as cur:
-            cur.execute(
-                "UPDATE agent_reflections SET applied_count = applied_count + 1 "
-                "WHERE agent = %s AND is_active = TRUE",
-                (agent,),
-            )
-        db_conn.commit()
+        await session.execute(
+            text("UPDATE agent_reflections SET applied_count = applied_count + 1 "
+                 "WHERE agent = :agent AND is_active = TRUE"),
+            {"agent": agent},
+        )
     except Exception as exc:
         log.warning("reflection_increment_failed", agent=agent, error=str(exc))

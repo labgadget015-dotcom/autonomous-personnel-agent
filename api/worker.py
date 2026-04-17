@@ -39,8 +39,7 @@ import os
 import logging
 from typing import Any, Dict, List, Optional
 
-import psycopg2
-import psycopg2.extras
+from sqlalchemy import text
 from arq.connections import RedisSettings
 from arq.cron import cron
 
@@ -84,42 +83,27 @@ def _redis_settings() -> RedisSettings:
 
 
 # ============================================================
-# DB helper for self-eval system
+# Self-eval helpers
 # ============================================================
-
-def _get_worker_db():
-    """Create a psycopg2 connection for the worker (self-eval system)."""
-    database_url = os.getenv(
-        "DATABASE_URL",
-        "postgresql://agent:agent@localhost:5432/personnel_agent",
-    )
-    try:
-        conn = psycopg2.connect(database_url, connect_timeout=5)
-        conn.autocommit = False
-        return conn
-    except Exception as exc:
-        logger.warning("Worker DB connection failed: %s", exc)
-        return None
-
 
 def _self_eval_enabled() -> bool:
     return os.getenv("SELF_EVAL_ENABLED", "false").lower() == "true"
 
 
-# ============================================================
-# Self-eval helpers: inject reflections + fire-and-forget eval
-# ============================================================
-
-def _inject_reflections(agent: str, db_conn) -> str:
-    """Load active reflections for the agent. Returns prefix string."""
-    if not _self_eval_enabled() or db_conn is None:
+async def _inject_reflections(agent: str) -> str:
+    """Load active reflections for the agent using async session. Returns prefix string."""
+    if not _self_eval_enabled():
         return ""
     try:
-        from api.reflection import get_active_reflections, increment_applied_count
-        prefix = get_active_reflections(agent, db_conn)
-        if prefix:
-            increment_applied_count(agent, db_conn)
-        return prefix
+        from db import session_ctx
+        from reflection import get_active_reflections, increment_applied_count
+        async with session_ctx() as session:
+            if session is None:
+                return ""
+            prefix = await get_active_reflections(agent, session)
+            if prefix:
+                await increment_applied_count(agent, session)
+            return prefix
     except Exception as exc:
         logger.warning("Reflection injection failed for %s: %s", agent, exc)
         return ""
@@ -153,7 +137,7 @@ async def _enqueue_eval(ctx, agent: str, user_input, agent_output, prompt_versio
 # ============================================================
 
 async def startup(ctx: Dict[str, Any]) -> None:
-    """Initialise shared resources — agents, OTel tracing, DB pool, logging."""
+    """Initialise shared resources — agents, OTel tracing, async DB, logging."""
     from agents import (
         OrchestratorAgent,
         TalentAgent,
@@ -165,9 +149,14 @@ async def startup(ctx: Dict[str, Any]) -> None:
     # Configure OTel on the worker process (separate process from API)
     try:
         from telemetry import configure_tracing
-        configure_tracing()   # no app= in worker — instruments Redis + psycopg2 only
+        configure_tracing()   # no app= in worker — instruments Redis + SQLAlchemy only
     except Exception as exc:
         logger.warning("OTel tracing not configured in worker: %s", exc)
+
+    # Async DB layer
+    from db import init_db
+    await init_db(os.environ.get("DATABASE_URL"))
+
     logger.info("arq worker starting up — initialising agents")
     ctx["orchestrator"] = OrchestratorAgent()
     ctx["talent"]       = TalentAgent()
@@ -178,20 +167,13 @@ async def startup(ctx: Dict[str, Any]) -> None:
         vectorstore_path=os.getenv("KNOWLEDGE_VECTORSTORE_PATH")
     )
 
-    # Self-eval: create shared DB connection and arq pool reference
-    ctx["db"] = _get_worker_db()
-
     logger.info("arq worker ready — all agents initialised")
 
 
 async def shutdown(ctx: Dict[str, Any]) -> None:
     logger.info("arq worker shutting down")
-    db = ctx.get("db")
-    if db:
-        try:
-            db.close()
-        except Exception:
-            pass
+    from db import close_db
+    await close_db()
 
 
 # ============================================================
@@ -211,7 +193,7 @@ async def run_route(ctx: Dict[str, Any], payload: Dict[str, Any],
 
         # Self-refining: inject reflections
         prompt_version = "1.0.0"
-        _inject_reflections("route", ctx.get("db"))
+        await _inject_reflections("route")
 
         result = ctx["orchestrator"].route(payload)
         result["request_id"] = job_request_id
@@ -241,7 +223,7 @@ async def run_talent_screen(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
 
         prompt_version = "1.0.0"
-        _inject_reflections("talent", ctx.get("db"))
+        await _inject_reflections("talent")
 
         result = ctx["talent"].screen_candidate(candidate_profile, role, history)
 
@@ -265,7 +247,7 @@ async def run_talent_outreach(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
 
         prompt_version = "1.0.0"
-        _inject_reflections("talent", ctx.get("db"))
+        await _inject_reflections("talent")
 
         result = ctx["talent"].draft_outreach(candidate, role, tone)
 
@@ -287,7 +269,7 @@ async def run_talent_pipeline_summary(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
 
         prompt_version = "1.0.0"
-        _inject_reflections("talent", ctx.get("db"))
+        await _inject_reflections("talent")
 
         result = ctx["talent"].build_pipeline_summary(pipeline_data)
 
@@ -315,7 +297,7 @@ async def run_scheduling_summarise(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
 
         prompt_version = "1.0.0"
-        _inject_reflections("scheduling", ctx.get("db"))
+        await _inject_reflections("scheduling")
 
         result = ctx["scheduling"].summarise_meeting(meeting_notes, attendees, context)
 
@@ -338,7 +320,7 @@ async def run_scheduling_followups(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
 
         prompt_version = "1.0.0"
-        _inject_reflections("scheduling", ctx.get("db"))
+        await _inject_reflections("scheduling")
 
         result = ctx["scheduling"].identify_cold_followups(people, threshold_days)
 
@@ -363,7 +345,7 @@ async def run_scheduling_invite(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
 
         prompt_version = "1.0.0"
-        _inject_reflections("scheduling", ctx.get("db"))
+        await _inject_reflections("scheduling")
 
         result = ctx["scheduling"].draft_meeting_invite(purpose, attendees, duration_minutes, context)
 
@@ -392,7 +374,7 @@ async def run_onboarding_plan(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
 
         prompt_version = "1.0.0"
-        _inject_reflections("onboarding", ctx.get("db"))
+        await _inject_reflections("onboarding")
 
         result = ctx["onboarding"].generate_onboarding_plan(person, role, tools, company_links)
 
@@ -415,7 +397,7 @@ async def run_onboarding_check(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
 
         prompt_version = "1.0.0"
-        _inject_reflections("onboarding", ctx.get("db"))
+        await _inject_reflections("onboarding")
 
         result = ctx["onboarding"].check_onboarding_progress(plan, days_since_start)
 
@@ -440,7 +422,7 @@ async def run_onboarding_offboarding(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
 
         prompt_version = "1.0.0"
-        _inject_reflections("onboarding", ctx.get("db"))
+        await _inject_reflections("onboarding")
 
         result = ctx["onboarding"].generate_offboarding_plan(person, reason, last_day, access_to_revoke)
 
@@ -469,7 +451,7 @@ async def run_performance_brief(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="performance")
 
         prompt_version = "1.0.0"
-        _inject_reflections("performance", ctx.get("db"))
+        await _inject_reflections("performance")
 
         result = ctx["performance"].generate_weekly_brief(people, goals, recent_interactions, github_activity)
 
@@ -493,7 +475,7 @@ async def run_performance_goal_risk(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="performance")
 
         prompt_version = "1.0.0"
-        _inject_reflections("performance", ctx.get("db"))
+        await _inject_reflections("performance")
 
         result = ctx["performance"].assess_goal_risk(goal, person, interactions)
 
@@ -520,7 +502,7 @@ async def run_knowledge_answer(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="knowledge")
 
         prompt_version = "1.0.0"
-        _inject_reflections("knowledge", ctx.get("db"))
+        await _inject_reflections("knowledge")
 
         result = ctx["knowledge"].answer_policy_question(question, raw_docs)
 
@@ -543,7 +525,7 @@ async def run_knowledge_generate(
             structlog.contextvars.bind_contextvars(request_id=_request_id, agent="knowledge")
 
         prompt_version = "1.0.0"
-        _inject_reflections("knowledge", ctx.get("db"))
+        await _inject_reflections("knowledge")
 
         result = ctx["knowledge"].generate_document(doc_type, context)
 
@@ -567,8 +549,9 @@ async def run_evaluate_outcome(
 ) -> dict:
     """Evaluate a completed agent output and store result + reflection if needed."""
     import structlog
-    from api.evaluation import evaluate_output
-    from api.reflection import generate_reflection
+    from evaluation import evaluate_output
+    from reflection import generate_reflection
+    from db import session_ctx
     log = structlog.get_logger()
 
     eval_result = await evaluate_output(
@@ -578,51 +561,47 @@ async def run_evaluate_outcome(
         prompt_version=prompt_version,
     )
 
-    db = ctx.get("db")
-    if db:
-        try:
-            with db.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO agent_outcomes
-                       (agent, trace_id, request_id, input_hash, score, passed, critique,
-                        rubric_scores, prompt_version, model)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (agent, trace_id, request_id, eval_result.input_hash,
-                     eval_result.score, eval_result.passed, eval_result.critique,
-                     json.dumps(eval_result.rubric), prompt_version, "gpt-4.1-mini"),
-                )
-            db.commit()
-        except Exception as exc:
-            log.warning("eval_outcome_write_failed", agent=agent, error=str(exc))
+    async with session_ctx() as session:
+        if session:
             try:
-                db.rollback()
-            except Exception:
-                pass
-
-        # Generate reflection if failed
-        if not eval_result.passed:
-            try:
-                reflection = await generate_reflection(
-                    agent=agent,
-                    score=eval_result.score,
-                    critique=eval_result.critique,
-                    failure_type=eval_result.failure_type,
-                    input_summary=str(user_input)[:300],
-                    output_summary=str(agent_output)[:300],
+                await session.execute(
+                    text("""INSERT INTO agent_outcomes
+                           (agent, trace_id, request_id, input_hash, score, passed, critique,
+                            rubric_scores, prompt_version, model)
+                           VALUES (:agent, :trace_id, :request_id, :input_hash, :score,
+                                   :passed, :critique, :rubric_scores, :prompt_version, :model)"""),
+                    {
+                        "agent": agent, "trace_id": trace_id, "request_id": request_id,
+                        "input_hash": eval_result.input_hash, "score": eval_result.score,
+                        "passed": eval_result.passed, "critique": eval_result.critique,
+                        "rubric_scores": json.dumps(eval_result.rubric),
+                        "prompt_version": prompt_version, "model": "gpt-4.1-mini",
+                    },
                 )
-                with db.cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO agent_reflections (agent, context_hash, reflection, failure_type)
-                           VALUES (%s,%s,%s,%s)""",
-                        (agent, eval_result.input_hash, reflection, eval_result.failure_type),
-                    )
-                db.commit()
             except Exception as exc:
-                log.warning("eval_reflection_write_failed", agent=agent, error=str(exc))
+                log.warning("eval_outcome_write_failed", agent=agent, error=str(exc))
+
+            # Generate reflection if failed
+            if not eval_result.passed:
                 try:
-                    db.rollback()
-                except Exception:
-                    pass
+                    reflection = await generate_reflection(
+                        agent=agent,
+                        score=eval_result.score,
+                        critique=eval_result.critique,
+                        failure_type=eval_result.failure_type,
+                        input_summary=str(user_input)[:300],
+                        output_summary=str(agent_output)[:300],
+                    )
+                    await session.execute(
+                        text("""INSERT INTO agent_reflections (agent, context_hash, reflection, failure_type)
+                               VALUES (:agent, :ctx_hash, :reflection, :failure_type)"""),
+                        {
+                            "agent": agent, "ctx_hash": eval_result.input_hash,
+                            "reflection": reflection, "failure_type": eval_result.failure_type,
+                        },
+                    )
+                except Exception as exc:
+                    log.warning("eval_reflection_write_failed", agent=agent, error=str(exc))
 
     log.info(
         "eval_complete",
@@ -638,7 +617,7 @@ async def run_evaluate_outcome(
 # Prompt Refiner (imported from api.refiner, registered as cron)
 # ============================================================
 
-from api.refiner import run_prompt_refiner
+from refiner import run_prompt_refiner
 
 
 # ============================================================

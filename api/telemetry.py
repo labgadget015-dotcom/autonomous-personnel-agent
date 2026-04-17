@@ -122,13 +122,13 @@ def configure_tracing(app=None) -> None:
         except ImportError:
             logger.warning("opentelemetry-instrumentation-httpx not installed")
 
-        # ---- Instrument psycopg2 ----
+        # ---- Instrument SQLAlchemy ----
         try:
-            from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
-            Psycopg2Instrumentor().instrument(tracer_provider=provider)
-            logger.info("psycopg2 instrumented with OTel")
+            from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+            SQLAlchemyInstrumentor().instrument(tracer_provider=provider)
+            logger.info("SQLAlchemy instrumented with OTel")
         except ImportError:
-            logger.warning("opentelemetry-instrumentation-psycopg2 not installed")
+            logger.warning("opentelemetry-instrumentation-sqlalchemy not installed")
 
         # ---- Instrument Redis (arq uses redis-py) ----
         try:

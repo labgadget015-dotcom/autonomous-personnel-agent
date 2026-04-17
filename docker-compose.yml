@@ -109,6 +109,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     environment:
       # OpenAI — required
       OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
@@ -135,6 +137,10 @@ services:
       # Runtime
       ENV: ${ENV:-production}
       PORT: "8000"
+      # OpenTelemetry
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_SERVICE_NAME: "autonomous-personnel-agent"
     volumes:
       # Persist knowledge vectorstore between restarts
       - knowledge_index:/app/knowledge_index
@@ -267,6 +273,26 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+  # ----------------------------------------------------------
+  # OTEL COLLECTOR — grafana/otel-lgtm all-in-one
+  # Provides: Grafana (3001), Jaeger (16686), Prometheus (9090), OTLP (4317/4318)
+  # ----------------------------------------------------------
+  otel-collector:
+    image: grafana/otel-lgtm:latest
+    container_name: personnel-otel
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "3100:3100"   # Loki
+      - "9090:9090"   # Prometheus
+      - "16686:16686" # Jaeger UI
+      - "3001:3000"   # Grafana UI (3000 used by dashboard)
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    networks:
+      - personnel-net
 
   # ----------------------------------------------------------
   # DASHBOARD (optional — static file server)

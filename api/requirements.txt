@@ -24,6 +24,15 @@ structlog>=24.0.0
 # Webhook retry
 tenacity>=8.3.0
 
+# OpenTelemetry distributed tracing
+opentelemetry-sdk>=1.24.0
+opentelemetry-instrumentation-fastapi>=0.45b0
+opentelemetry-instrumentation-httpx>=0.45b0
+opentelemetry-instrumentation-psycopg2>=0.45b0
+opentelemetry-instrumentation-redis>=0.45b0
+opentelemetry-exporter-otlp-proto-grpc>=1.24.0
+opentelemetry-semantic-conventions>=0.45b0
+
 # Test dependencies
 pytest>=8.2.0
 pytest-asyncio>=0.23.0

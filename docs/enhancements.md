@@ -335,3 +335,23 @@ Surface this in the health panel already wired into the dashboard.
 | Key Rotation Detection | Medium | Low | ✅ Yes |
 
 The four "Yes" low-effort items (rate limiting, structured logging, request ID, cost tracking, key rotation) can be added in a single PR and deliver immediate operational value with minimal risk.
+
+---
+
+## Implemented: OpenTelemetry Distributed Tracing (Session 6)
+
+### What was added
+- `api/telemetry.py`: OTel SDK init, FastAPI/httpx/psycopg2/Redis auto-instrumentation, `get_tracer()` and `current_trace_id()` helpers, console + OTLP gRPC exporters, no-op fallback when disabled.
+- `api/middleware/tracing.py`: `TracingContextMiddleware` bridges OTel `trace_id`/`span_id` into structlog context vars and echoes `X-Trace-ID` response header.
+- `api/worker.py`: All 14 arq job functions wrapped in OTel spans; `_request_id` propagated as span attribute connecting HTTP → queue → worker → LangChain.
+- `api/main.py`: `configure_tracing(app)` called at startup; per-agent p99 latency tracking via `_latency_windows` (deque, maxlen=100); `/metrics` returns merged `by_agent` dict with p50/p99/samples.
+- `dashboard/index.html`: New "LLM Cost & Latency" panel with Chart.js horizontal bar charts for per-agent token cost and p99 latency; 3 summary KPI cards; live polling every 60 s.
+- `docker-compose.yml`: `grafana/otel-lgtm` all-in-one service (Grafana on 3001, Jaeger on 16686, Prometheus on 9090, OTLP gRPC on 4317).
+
+### Trace flow
+HTTP request → `TracingContextMiddleware` (creates root span, injects trace_id into structlog) → `_enqueue()` passes `_request_id` as arq job arg → arq worker receives `_request_id`, creates child span with same trace context → LangChain callback records token cost + attaches to span → span exported to OTLP collector.
+
+### Grafana / Jaeger access (local dev)
+- Grafana: http://localhost:3001 (anonymous admin)
+- Jaeger UI: http://localhost:16686
+- Prometheus: http://localhost:9090

@@ -69,6 +69,8 @@ from guardrails import evaluate as guardrails_evaluate, GuardrailResult
 from health import run_health_checks
 from middleware.request_id import RequestIDMiddleware
 from middleware.cost_tracker import CostTrackingCallback, get_cumulative_cost
+from middleware.tracing import TracingContextMiddleware
+from telemetry import configure_tracing
 
 # ---- Rate limiting (requires Redis — soft-fail if unavailable) ----
 try:
@@ -138,11 +140,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ---- OpenTelemetry (instruments FastAPI, httpx, Redis, psycopg2) ----
+configure_tracing(app)
+
 # ---- Middleware: order matters — registered in reverse call order ----
 # 1. Request ID (outermost — assigns ID before anything logs)
 app.add_middleware(RequestIDMiddleware)
 
-# 2. CORS
+# 2. OTel tracing context — bridges trace_id into structlog after FastAPIInstrumentor sets the span
+app.add_middleware(TracingContextMiddleware)
+
+# 3. CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
@@ -151,17 +159,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3. Rate limiting
+# 4. Rate limiting
 if _rate_limit_available:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-# ---- In-memory metrics ----
+# ---- In-memory metrics + p99 latency tracking ----
 _metrics: Dict[str, Any] = {
     "requests_total": 0,
     "errors_total": 0,
     "started_at": datetime.now(timezone.utc).isoformat(),
 }
+
+# Per-agent latency window: keep last 100 samples, compute p50/p99
+import collections, threading
+_latency_lock = threading.Lock()
+_latency_windows: Dict[str, collections.deque] = {
+    agent: collections.deque(maxlen=100)
+    for agent in ("orchestrator", "talent", "scheduling", "onboarding", "performance", "knowledge")
+}
+
+def _record_latency(agent: str, latency_ms: int) -> None:
+    with _latency_lock:
+        if agent in _latency_windows:
+            _latency_windows[agent].append(latency_ms)
+
+def _percentile(data: list, pct: float) -> Optional[float]:
+    if not data: return None
+    s = sorted(data)
+    idx = int(len(s) * pct / 100)
+    return s[min(idx, len(s) - 1)]
+
+def get_latency_stats() -> Dict[str, Any]:
+    with _latency_lock:
+        result = {}
+        for agent, window in _latency_windows.items():
+            data = list(window)
+            if data:
+                result[agent] = {
+                    "p50_ms": _percentile(data, 50),
+                    "p99_ms": _percentile(data, 99),
+                    "samples": len(data),
+                }
+        return result
 
 # ============================================================
 # AUTH
@@ -282,10 +322,19 @@ async def request_logging_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
         latency_ms = int((time.time() - start) * 1000)
+        # Record latency against the agent from the path (best-effort)
+        path = request.url.path
+        for agent_name in ("talent", "scheduling", "onboarding", "performance", "knowledge", "route"):
+            if f"/{agent_name}" in path or path == "/route":
+                _record_latency(
+                    "orchestrator" if path == "/route" else agent_name,
+                    latency_ms
+                )
+                break
         log.info(
             "request_complete",
             method=request.method,
-            path=request.url.path,
+            path=path,
             status_code=response.status_code,
             latency_ms=latency_ms,
         )
@@ -306,7 +355,11 @@ def _cost_callback(agent: str) -> CostTrackingCallback:
 
 
 async def _enqueue(func_name: str, request_id: str, **kwargs) -> AsyncJobResponse:
-    """Enqueue a job on the arq worker pool. Raises 503 if Redis unavailable."""
+    """
+    Enqueue a job on the arq worker pool.
+    Passes _request_id to the job function so the worker span links back
+    to the originating HTTP trace. Raises 503 if Redis unavailable.
+    """
     pool = await _get_arq_pool()
     if pool is None:
         raise HTTPException(
@@ -314,7 +367,7 @@ async def _enqueue(func_name: str, request_id: str, **kwargs) -> AsyncJobRespons
             detail="Async job queue unavailable. Redis is not connected. "
                    "Use the synchronous endpoint instead.",
         )
-    job = await pool.enqueue_job(func_name, **kwargs, _job_id=request_id)
+    job = await pool.enqueue_job(func_name, **kwargs, _request_id=request_id, _job_id=request_id)
     return AsyncJobResponse(job_id=job.job_id)
 
 
@@ -345,12 +398,24 @@ async def liveness():
 @app.get("/metrics", tags=["System"])
 async def metrics(_: str = Depends(verify_token)):
     cost_data = get_cumulative_cost()
+    latency_data = get_latency_stats()
+    # Merge latency p99 into the per-agent cost breakdown
+    by_agent = cost_data.get("by_agent", {})
+    for agent, lat in latency_data.items():
+        if agent in by_agent:
+            by_agent[agent].update(lat)
+        else:
+            by_agent[agent] = lat
     return {
         **_metrics,
         "uptime_seconds": int(
             (datetime.now(timezone.utc) - datetime.fromisoformat(_metrics["started_at"])).total_seconds()
         ),
-        "llm_cost": cost_data,
+        "llm_cost": {
+            **cost_data,
+            "by_agent": by_agent,
+        },
+        "latency": latency_data,
     }
 
 

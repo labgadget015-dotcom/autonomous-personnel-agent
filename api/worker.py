@@ -40,6 +40,14 @@ from arq.connections import RedisSettings
 
 logger = logging.getLogger("personnel-agent.worker")
 
+# OTel tracer — no-op if package not installed
+try:
+    from telemetry import get_tracer, configure_tracing
+    _tracer = get_tracer("personnel-agent.worker")
+except ImportError:
+    from telemetry import _NoOpTracer  # type: ignore
+    _tracer = _NoOpTracer()
+
 # ============================================================
 # Redis configuration
 # ============================================================
@@ -65,7 +73,7 @@ def _redis_settings() -> RedisSettings:
 # ============================================================
 
 async def startup(ctx: Dict[str, Any]) -> None:
-    """Initialise shared resources — agents, DB pool, logging."""
+    """Initialise shared resources — agents, OTel tracing, DB pool, logging."""
     from agents import (
         OrchestratorAgent,
         TalentAgent,
@@ -74,6 +82,12 @@ async def startup(ctx: Dict[str, Any]) -> None:
         PerformanceAgent,
         KnowledgeAgent,
     )
+    # Configure OTel on the worker process (separate process from API)
+    try:
+        from telemetry import configure_tracing
+        configure_tracing()   # no app= in worker — instruments Redis + psycopg2 only
+    except Exception as exc:
+        logger.warning("OTel tracing not configured in worker: %s", exc)
     logger.info("arq worker starting up — initialising agents")
     ctx["orchestrator"] = OrchestratorAgent()
     ctx["talent"]       = TalentAgent()
@@ -94,11 +108,18 @@ async def shutdown(ctx: Dict[str, Any]) -> None:
 # Job functions — Orchestrator
 # ============================================================
 
-async def run_route(ctx: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+async def run_route(ctx: Dict[str, Any], payload: Dict[str, Any],
+                    _request_id: Optional[str] = None) -> Dict[str, Any]:
     """Route an event through the orchestrator."""
     import uuid
-    result = ctx["orchestrator"].route(payload)
-    result["request_id"] = str(uuid.uuid4())
+    job_request_id = _request_id or str(uuid.uuid4())
+    with _tracer.start_as_current_span("worker.run_route") as span:
+        span.set_attribute("agent", "orchestrator")
+        span.set_attribute("request_id", job_request_id)
+        import structlog
+        structlog.contextvars.bind_contextvars(request_id=job_request_id, agent="orchestrator")
+        result = ctx["orchestrator"].route(payload)
+        result["request_id"] = job_request_id
     return result
 
 
@@ -111,8 +132,15 @@ async def run_talent_screen(
     candidate_profile: Dict[str, Any],
     role: Dict[str, Any],
     history: Optional[List[Dict]] = None,
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["talent"].screen_candidate(candidate_profile, role, history)
+    with _tracer.start_as_current_span("worker.run_talent_screen") as span:
+        span.set_attribute("agent", "talent")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
+        return ctx["talent"].screen_candidate(candidate_profile, role, history)
 
 
 async def run_talent_outreach(
@@ -120,15 +148,29 @@ async def run_talent_outreach(
     candidate: Dict[str, Any],
     role: Dict[str, Any],
     tone: str = "professional_warm",
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["talent"].draft_outreach(candidate, role, tone)
+    with _tracer.start_as_current_span("worker.run_talent_outreach") as span:
+        span.set_attribute("agent", "talent")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
+        return ctx["talent"].draft_outreach(candidate, role, tone)
 
 
 async def run_talent_pipeline_summary(
     ctx: Dict[str, Any],
     pipeline_data: List[Dict[str, Any]],
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["talent"].build_pipeline_summary(pipeline_data)
+    with _tracer.start_as_current_span("worker.run_talent_pipeline_summary") as span:
+        span.set_attribute("agent", "talent")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="talent")
+        return ctx["talent"].build_pipeline_summary(pipeline_data)
 
 
 # ============================================================
@@ -140,16 +182,30 @@ async def run_scheduling_summarise(
     meeting_notes: str,
     attendees: List[Dict[str, Any]],
     context: Optional[Dict[str, Any]] = None,
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["scheduling"].summarise_meeting(meeting_notes, attendees, context)
+    with _tracer.start_as_current_span("worker.run_scheduling_summarise") as span:
+        span.set_attribute("agent", "scheduling")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
+        return ctx["scheduling"].summarise_meeting(meeting_notes, attendees, context)
 
 
 async def run_scheduling_followups(
     ctx: Dict[str, Any],
     people: List[Dict[str, Any]],
     threshold_days: int = 14,
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["scheduling"].identify_cold_followups(people, threshold_days)
+    with _tracer.start_as_current_span("worker.run_scheduling_followups") as span:
+        span.set_attribute("agent", "scheduling")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
+        return ctx["scheduling"].identify_cold_followups(people, threshold_days)
 
 
 async def run_scheduling_invite(
@@ -158,8 +214,15 @@ async def run_scheduling_invite(
     attendees: List[Dict[str, Any]],
     duration_minutes: int = 30,
     context: Optional[Dict[str, Any]] = None,
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["scheduling"].draft_meeting_invite(purpose, attendees, duration_minutes, context)
+    with _tracer.start_as_current_span("worker.run_scheduling_invite") as span:
+        span.set_attribute("agent", "scheduling")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="scheduling")
+        return ctx["scheduling"].draft_meeting_invite(purpose, attendees, duration_minutes, context)
 
 
 # ============================================================
@@ -172,16 +235,30 @@ async def run_onboarding_plan(
     role: Dict[str, Any],
     tools: List[str],
     company_links: Optional[Dict[str, Any]] = None,
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["onboarding"].generate_onboarding_plan(person, role, tools, company_links)
+    with _tracer.start_as_current_span("worker.run_onboarding_plan") as span:
+        span.set_attribute("agent", "onboarding")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
+        return ctx["onboarding"].generate_onboarding_plan(person, role, tools, company_links)
 
 
 async def run_onboarding_check(
     ctx: Dict[str, Any],
     plan: Dict[str, Any],
     days_since_start: int,
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["onboarding"].check_onboarding_progress(plan, days_since_start)
+    with _tracer.start_as_current_span("worker.run_onboarding_check") as span:
+        span.set_attribute("agent", "onboarding")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
+        return ctx["onboarding"].check_onboarding_progress(plan, days_since_start)
 
 
 async def run_onboarding_offboarding(
@@ -190,8 +267,15 @@ async def run_onboarding_offboarding(
     reason: str,
     last_day: str,
     access_to_revoke: List[str],
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["onboarding"].generate_offboarding_plan(person, reason, last_day, access_to_revoke)
+    with _tracer.start_as_current_span("worker.run_onboarding_offboarding") as span:
+        span.set_attribute("agent", "onboarding")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="onboarding")
+        return ctx["onboarding"].generate_offboarding_plan(person, reason, last_day, access_to_revoke)
 
 
 # ============================================================
@@ -204,8 +288,15 @@ async def run_performance_brief(
     goals: List[Dict[str, Any]],
     recent_interactions: List[Dict[str, Any]],
     github_activity: Optional[Dict[str, Any]] = None,
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["performance"].generate_weekly_brief(people, goals, recent_interactions, github_activity)
+    with _tracer.start_as_current_span("worker.run_performance_brief") as span:
+        span.set_attribute("agent", "performance")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="performance")
+        return ctx["performance"].generate_weekly_brief(people, goals, recent_interactions, github_activity)
 
 
 async def run_performance_goal_risk(
@@ -213,8 +304,15 @@ async def run_performance_goal_risk(
     goal: Dict[str, Any],
     person: Dict[str, Any],
     interactions: List[Dict[str, Any]],
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["performance"].assess_goal_risk(goal, person, interactions)
+    with _tracer.start_as_current_span("worker.run_performance_goal_risk") as span:
+        span.set_attribute("agent", "performance")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="performance")
+        return ctx["performance"].assess_goal_risk(goal, person, interactions)
 
 
 # ============================================================
@@ -225,16 +323,30 @@ async def run_knowledge_answer(
     ctx: Dict[str, Any],
     question: str,
     raw_docs: Optional[List[str]] = None,
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["knowledge"].answer_policy_question(question, raw_docs)
+    with _tracer.start_as_current_span("worker.run_knowledge_answer") as span:
+        span.set_attribute("agent", "knowledge")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="knowledge")
+        return ctx["knowledge"].answer_policy_question(question, raw_docs)
 
 
 async def run_knowledge_generate(
     ctx: Dict[str, Any],
     doc_type: str,
     context: Dict[str, Any],
+    _request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return ctx["knowledge"].generate_document(doc_type, context)
+    with _tracer.start_as_current_span("worker.run_knowledge_generate") as span:
+        span.set_attribute("agent", "knowledge")
+        if _request_id:
+            span.set_attribute("request_id", _request_id)
+            import structlog
+            structlog.contextvars.bind_contextvars(request_id=_request_id, agent="knowledge")
+        return ctx["knowledge"].generate_document(doc_type, context)
 
 
 # ============================================================

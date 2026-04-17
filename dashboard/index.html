@@ -86,6 +86,127 @@
       margin: 0 auto;
     }
 
+    /* ===== SYSTEM HEALTH PANEL ===== */
+    .health-banner {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 20px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      margin-bottom: 24px;
+      font-size: 13px;
+      transition: background 0.3s, border-color 0.3s;
+      position: relative;
+      overflow: hidden;
+    }
+    .health-banner.ok         { background: rgba(16,185,129,.08); border-color: rgba(16,185,129,.25); }
+    .health-banner.degraded   { background: rgba(245,158,11,.08); border-color: rgba(245,158,11,.35); }
+    .health-banner.unhealthy  { background: rgba(239,68,68,.1);   border-color: rgba(239,68,68,.4);  }
+    .health-banner.loading    { background: rgba(99,102,241,.06); border-color: var(--border); }
+    .health-banner.offline    { background: rgba(148,163,184,.06); border-color: var(--border); }
+
+    .health-banner-icon { font-size: 20px; flex-shrink: 0; }
+    .health-banner-title { font-weight: 700; font-size: 14px; }
+    .health-banner-sub   { color: var(--muted); font-size: 12px; margin-top: 1px; }
+    .health-banner-checks {
+      display: flex;
+      gap: 10px;
+      margin-left: auto;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .health-checks-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .health-check-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      transition: border-color 0.25s;
+    }
+    .health-check-card.ok        { border-color: rgba(16,185,129,.3); }
+    .health-check-card.degraded,
+    .health-check-card.warn      { border-color: rgba(245,158,11,.35); }
+    .health-check-card.unhealthy,
+    .health-check-card.fail      { border-color: rgba(239,68,68,.4); }
+    .health-check-card.loading   { border-color: var(--border); }
+
+    .hc-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+    .hc-icon.ok        { background: rgba(16,185,129,.15); }
+    .hc-icon.warn,
+    .hc-icon.degraded  { background: rgba(245,158,11,.15); }
+    .hc-icon.fail,
+    .hc-icon.unhealthy { background: rgba(239,68,68,.15); }
+    .hc-icon.loading   { background: rgba(99,102,241,.1); }
+    .hc-icon.skip      { background: rgba(148,163,184,.1); }
+
+    .hc-body { flex: 1; min-width: 0; }
+    .hc-name  { font-size: 12px; font-weight: 600; text-transform: uppercase;
+                letter-spacing: 0.06em; color: var(--muted); margin-bottom: 2px; }
+    .hc-value { font-size: 14px; font-weight: 600; white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; }
+    .hc-detail { font-size: 11px; color: var(--muted); margin-top: 3px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .hc-pill {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .hc-pill.ok        { background: rgba(16,185,129,.2);  color: #10b981; }
+    .hc-pill.warn,
+    .hc-pill.degraded  { background: rgba(245,158,11,.2);  color: #f59e0b; }
+    .hc-pill.fail,
+    .hc-pill.unhealthy { background: rgba(239,68,68,.2);   color: #ef4444; }
+    .hc-pill.skip      { background: rgba(148,163,184,.15); color: #94a3b8; }
+    .hc-pill.loading   { background: rgba(99,102,241,.15); color: #a5b4fc; }
+
+    .health-meta {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 20px;
+      padding: 0 2px;
+    }
+    .health-meta .build-tag {
+      font-family: 'SF Mono', 'Fira Mono', monospace;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      border-radius: 5px;
+      font-size: 11px;
+      color: #a5b4fc;
+    }
+
+    /* ===== END HEALTH PANEL ===== */
+
     /* KPI CARDS */
     .kpi-grid {
       display: grid;
@@ -383,7 +504,63 @@
     <button onclick="toggleAutoRefresh()">Auto-refresh: <span id="auto-refresh-label">OFF</span></button>
   </div>
 
+  <!-- ============================================================ -->
+  <!-- SYSTEM HEALTH PANEL -->
+  <!-- ============================================================ -->
+
+  <!-- Overall status banner -->
+  <div class="health-banner loading" id="health-banner">
+    <div class="health-banner-icon" id="health-banner-icon">⏳</div>
+    <div>
+      <div class="health-banner-title" id="health-banner-title">Connecting to API...</div>
+      <div class="health-banner-sub" id="health-banner-sub">Waiting for first health response</div>
+    </div>
+    <div style="margin-left: auto; display: flex; align-items: center; gap: 12px;">
+      <span id="health-uptime" style="font-size:12px; color: var(--muted);"></span>
+      <span id="health-build" class="build-tag" style="font-family: monospace; background: var(--surface); border: 1px solid var(--border); padding: 2px 8px; border-radius: 5px; font-size: 11px; color: #a5b4fc;"></span>
+    </div>
+  </div>
+
+  <!-- Individual check cards -->
+  <div class="health-checks-grid" id="health-checks-grid">
+    <div class="health-check-card loading" id="hc-postgres">
+      <div class="hc-icon loading" id="hc-postgres-icon">🗄</div>
+      <div class="hc-body">
+        <div class="hc-name">PostgreSQL</div>
+        <div class="hc-value" id="hc-postgres-value">—<span class="hc-pill loading">checking</span></div>
+        <div class="hc-detail" id="hc-postgres-detail">Awaiting health response</div>
+      </div>
+    </div>
+    <div class="health-check-card loading" id="hc-llm">
+      <div class="hc-icon loading" id="hc-llm-icon">🤖</div>
+      <div class="hc-body">
+        <div class="hc-name">LLM Client</div>
+        <div class="hc-value" id="hc-llm-value">—<span class="hc-pill loading">checking</span></div>
+        <div class="hc-detail" id="hc-llm-detail">Awaiting health response</div>
+      </div>
+    </div>
+    <div class="health-check-card loading" id="hc-env">
+      <div class="hc-icon loading" id="hc-env-icon">⚙️</div>
+      <div class="hc-body">
+        <div class="hc-name">Environment</div>
+        <div class="hc-value" id="hc-env-value">—<span class="hc-pill loading">checking</span></div>
+        <div class="hc-detail" id="hc-env-detail">Awaiting health response</div>
+      </div>
+    </div>
+    <div class="health-check-card loading" id="hc-disk">
+      <div class="hc-icon loading" id="hc-disk-icon">💾</div>
+      <div class="hc-body">
+        <div class="hc-name">Disk</div>
+        <div class="hc-value" id="hc-disk-value">—<span class="hc-pill loading">checking</span></div>
+        <div class="hc-detail" id="hc-disk-detail">Awaiting health response</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
   <!-- KPIs -->
+  <!-- ============================================================ -->
+
   <div class="kpi-grid" id="kpi-grid">
     <div class="kpi-card purple">
       <div class="kpi-icon">👥</div>
@@ -523,7 +700,9 @@
   let API_URL = '';
   let API_TOKEN = '';
   let autoRefreshInterval = null;
+  let healthRefreshInterval = null;
   let charts = {};
+  let lastHealthData = null;
 
   function getConfig() {
     API_URL   = document.getElementById('api-url').value.trim().replace(/\/$/, '');
@@ -548,6 +727,181 @@
       if (!res.ok) return null;
       return await res.json();
     } catch {
+      return null;
+    }
+  }
+
+  // ============================================================
+  // HEALTH PANEL
+  // ============================================================
+
+  const HEALTH_CHECK_CONFIG = [
+    {
+      key: 'postgres',
+      id: 'hc-postgres',
+      icon: '🗄',
+      label: 'PostgreSQL',
+      getValue: (c) => c.latency_ms != null ? `${c.latency_ms}ms` : (c.status === 'warn' ? 'Skipped' : 'Unreachable'),
+      getDetail: (c) => c.detail || '—',
+    },
+    {
+      key: 'llm_client',
+      id: 'hc-llm',
+      icon: '🤖',
+      label: 'LLM Client',
+      getValue: (c) => c.orchestrator_model || c.model || 'Unknown model',
+      getDetail: (c) => c.detail || '—',
+    },
+    {
+      key: 'environment',
+      id: 'hc-env',
+      icon: '⚙️',
+      label: 'Environment',
+      getValue: (c) => {
+        const missing = (c.missing_required || []).concat(c.missing_recommended || []);
+        return missing.length ? `${missing.length} var${missing.length > 1 ? 's' : ''} missing` : 'All vars set';
+      },
+      getDetail: (c) => c.detail || '—',
+    },
+    {
+      key: 'disk',
+      id: 'hc-disk',
+      icon: '💾',
+      label: 'Disk',
+      getValue: (c) => c.free_gb != null ? `${c.free_gb} GB free` : 'Unknown',
+      getDetail: (c) => c.detail || '—',
+    },
+  ];
+
+  const STATUS_META = {
+    ok:        { icon: '✅', title: 'All Systems Operational', cls: 'ok',        dot: '#10b981' },
+    degraded:  { icon: '⚠️', title: 'Degraded — Some checks need attention', cls: 'degraded', dot: '#f59e0b' },
+    unhealthy: { icon: '🔴', title: 'Unhealthy — Critical failure detected', cls: 'unhealthy', dot: '#ef4444' },
+    offline:   { icon: '⚫', title: 'API Offline — Cannot reach service', cls: 'offline',   dot: '#94a3b8' },
+    loading:   { icon: '⏳', title: 'Connecting to API...', cls: 'loading',  dot: '#6366f1' },
+  };
+
+  function formatUptime(seconds) {
+    if (seconds == null) return '';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `up ${h}h ${m}m`;
+    if (m > 0) return `up ${m}m ${s}s`;
+    return `up ${s}s`;
+  }
+
+  function renderHealthPanel(healthData) {
+    if (!healthData) {
+      // API offline
+      const meta = STATUS_META.offline;
+      const banner = document.getElementById('health-banner');
+      banner.className = `health-banner ${meta.cls}`;
+      document.getElementById('health-banner-icon').textContent  = meta.icon;
+      document.getElementById('health-banner-title').textContent = meta.title;
+      document.getElementById('health-banner-sub').textContent   = 'Check API URL and token in config above';
+      document.getElementById('health-uptime').textContent  = '';
+      document.getElementById('health-build').textContent   = '';
+      // Set all checks to unknown
+      HEALTH_CHECK_CONFIG.forEach(cfg => {
+        const card = document.getElementById(cfg.id);
+        if (card) card.className = `health-check-card loading`;
+        const icon = document.getElementById(`${cfg.id}-icon`);
+        if (icon) { icon.className = 'hc-icon loading'; icon.textContent = cfg.icon; }
+        const val = document.getElementById(`${cfg.id}-value`);
+        if (val) val.innerHTML = `—<span class="hc-pill loading">offline</span>`;
+        const det = document.getElementById(`${cfg.id}-detail`);
+        if (det) det.textContent = 'API unreachable';
+      });
+      // Grey out the header status dot
+      const dot = document.querySelector('.status-dot');
+      if (dot) dot.style.background = meta.dot;
+      return;
+    }
+
+    lastHealthData = healthData;
+    const overall  = healthData.status || 'loading';
+    const checks   = healthData.checks || {};
+    const meta     = STATUS_META[overall] || STATUS_META.loading;
+
+    // --- Banner ---
+    const banner = document.getElementById('health-banner');
+    banner.className = `health-banner ${meta.cls}`;
+    document.getElementById('health-banner-icon').textContent  = meta.icon;
+    document.getElementById('health-banner-title').textContent = meta.title;
+
+    const ts = healthData.timestamp
+      ? new Date(healthData.timestamp).toLocaleTimeString()
+      : '—';
+    document.getElementById('health-banner-sub').textContent =
+      `Last checked ${ts} · v${healthData.version || '—'}`;
+
+    // Uptime
+    const uptimeEl = document.getElementById('health-uptime');
+    uptimeEl.textContent = formatUptime(healthData.uptime_seconds);
+
+    // Build tag
+    const build = healthData.build || {};
+    const buildEl = document.getElementById('health-build');
+    if (build.version && build.version !== 'dev') {
+      buildEl.textContent = build.version;
+      buildEl.title = `SHA: ${build.sha || '?'} · Built: ${build.date || '?'}`;
+    } else {
+      buildEl.textContent = build.sha ? `sha-${build.sha.slice(0, 7)}` : 'dev';
+    }
+
+    // Header dot colour
+    const dot = document.querySelector('.status-dot');
+    if (dot) dot.style.background = meta.dot;
+
+    // --- Individual check cards ---
+    HEALTH_CHECK_CONFIG.forEach(cfg => {
+      const checkData = checks[cfg.key];
+      if (!checkData) return;
+
+      const status   = checkData.status || 'loading';
+      const cardCls  = ['ok','warn','fail','skip','loading'].includes(status) ? status : 'loading';
+      const iconCls  = cardCls;
+      const pillCls  = cardCls === 'fail' ? 'fail' : cardCls === 'warn' ? 'warn' : cardCls;
+      const pillText = status.toUpperCase();
+
+      const card = document.getElementById(cfg.id);
+      if (card) card.className = `health-check-card ${cardCls}`;
+
+      const iconEl = document.getElementById(`${cfg.id}-icon`);
+      if (iconEl) {
+        iconEl.className = `hc-icon ${iconCls}`;
+        iconEl.textContent = cfg.icon;
+      }
+
+      const valEl = document.getElementById(`${cfg.id}-value`);
+      if (valEl) {
+        const valueText = cfg.getValue(checkData);
+        valEl.innerHTML = `${valueText}<span class="hc-pill ${pillCls}">${pillText}</span>`;
+      }
+
+      const detEl = document.getElementById(`${cfg.id}-detail`);
+      if (detEl) detEl.textContent = cfg.getDetail(checkData);
+    });
+  }
+
+  async function fetchAndRenderHealth() {
+    getConfig();
+    if (!API_URL) {
+      renderHealthPanel(null);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_URL}/health`, {
+        headers: API_TOKEN ? { 'x-api-token': API_TOKEN } : {},
+        signal: AbortSignal.timeout(8000),
+      });
+      // Accept both 200 (ok/degraded) and 503 (unhealthy) — both have a body
+      const data = await res.json();
+      renderHealthPanel(data);
+      return data;
+    } catch {
+      renderHealthPanel(null);
       return null;
     }
   }
@@ -818,18 +1172,13 @@
     getConfig();
     document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
 
-    // Try live API; fall back to mock data
-    const healthCheck = await apiFetch('/health');
-    let data;
+    // Run health check and KPI load in parallel
+    const [healthData] = await Promise.all([
+      fetchAndRenderHealth(),
+    ]);
 
-    if (healthCheck) {
-      // TODO: Implement real Postgres queries via API endpoints when connected
-      // For now, use mock data decorated with live health status
-      data = getMockData();
-    } else {
-      data = getMockData();
-    }
-
+    // Load KPI + chart data (live API when connected, mock otherwise)
+    const data = getMockData();
     renderKPIs(data);
     renderCharts(data);
     renderApprovals(data.approvals);
@@ -840,15 +1189,19 @@
   function toggleAutoRefresh() {
     if (autoRefreshInterval) {
       clearInterval(autoRefreshInterval);
+      clearInterval(healthRefreshInterval);
       autoRefreshInterval = null;
+      healthRefreshInterval = null;
       document.getElementById('auto-refresh-label').textContent = 'OFF';
     } else {
-      autoRefreshInterval = setInterval(loadDashboard, 30000);
-      document.getElementById('auto-refresh-label').textContent = 'ON (30s)';
+      // KPIs refresh every 30s; health refreshes independently every 15s
+      autoRefreshInterval   = setInterval(loadDashboard, 30000);
+      healthRefreshInterval = setInterval(fetchAndRenderHealth, 15000);
+      document.getElementById('auto-refresh-label').textContent = 'ON (30s / 15s health)';
     }
   }
 
-  // Initial load with mock data
+  // Initial load
   window.addEventListener('DOMContentLoaded', loadDashboard);
 </script>
 

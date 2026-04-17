@@ -255,3 +255,163 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "**Digest:** \`${{ needs.build-and-push.outputs.image-digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================
+  # JOB: Integration tests — real Postgres + live API server
+  # Runs AFTER smoke-test; only on pushes to main (not PRs)
+  # ============================================================
+  integration-test:
+    name: Integration Tests (Postgres + API)
+    runs-on: ubuntu-22.04
+    needs: [smoke-test]
+    permissions:
+      contents: read
+
+    # ---- Real Postgres service container ----
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: personnel_agent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d personnel_agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Used by conftest.py live_app fixture
+      TEST_DATABASE_URL: postgresql://testuser:testpass@localhost:5432/personnel_agent_test
+      # Dummy LLM key — all LLM calls are mocked in tests
+      OPENAI_API_KEY: sk-integration-test-dummy
+      API_TOKEN: test-token-ci
+      ENV: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ---- Python setup ----
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: api/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r api/requirements.txt
+          pip install pytest pytest-asyncio httpx psycopg2-binary
+
+      # ---- Apply schema to test DB ----
+      - name: Apply schema migration
+        run: |
+          echo "Applying db/schema.sql to test database..."
+          PGPASSWORD=testpass psql \
+            -h localhost \
+            -U testuser \
+            -d personnel_agent_test \
+            -f db/schema.sql
+          echo "Schema applied."
+
+      # ---- Verify schema objects exist ----
+      - name: Verify schema objects
+        run: |
+          PGPASSWORD=testpass psql \
+            -h localhost -U testuser -d personnel_agent_test \
+            -c "\dt" | grep -E "people|interactions|tasks|events|roles" \
+            || (echo "FAIL: expected tables not found after migration" && exit 1)
+          echo "PASS: core tables verified."
+
+      # ---- Start API server in background ----
+      - name: Start FastAPI server
+        run: |
+          export DATABASE_URL="$TEST_DATABASE_URL"
+          cd api
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
+          echo "API_PID=$!" >> "$GITHUB_ENV"
+          echo "Waiting for API to become ready..."
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8000/health/live > /dev/null 2>&1; then
+              echo "  API ready after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: API did not start within 40s"
+          exit 1
+
+      # ---- Run full test suite ----
+      - name: Run pytest integration suite
+        run: |
+          pytest api/tests/ \
+            -v \
+            --tb=short \
+            --junit-xml=test-results/integration.xml \
+            -p no:cacheprovider \
+            2>&1 | tee test-output.txt
+
+      # ---- Upload test results (always, so failures are inspectable) ----
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results-${{ needs.build-and-push.outputs.version || github.sha }}
+          path: |
+            test-results/
+            test-output.txt
+          retention-days: 14
+
+      # ---- Summary ----
+      - name: Write test summary
+        if: always()
+        run: |
+          echo "## Integration Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f test-output.txt ]; then
+            # Extract pass/fail counts from pytest output
+            SUMMARY=$(grep -E "passed|failed|error" test-output.txt | tail -1 || echo "See full output in artifact")
+            echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Database:** PostgreSQL 16 (ephemeral, test-only)" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Schema:** Applied from \`db/schema.sql\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Test files:** \`api/tests/test_schema.py\`, \`api/tests/test_endpoints.py\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Stop API server ----
+      - name: Stop API server
+        if: always()
+        run: |
+          if [ -n "$API_PID" ]; then
+            kill "$API_PID" 2>/dev/null || true
+          fi
+
+  # ============================================================
+  # GATE: All checks must pass before reporting overall success
+  # ============================================================
+  all-checks:
+    name: All CD Checks Passed
+    runs-on: ubuntu-22.04
+    needs: [build-and-push, smoke-test, integration-test]
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          if [[ "${{ needs.build-and-push.result }}" != "success" || \
+                "${{ needs.smoke-test.result }}" != "success" || \
+                "${{ needs.integration-test.result }}" != "success" ]]; then
+            echo "One or more CD jobs failed:"
+            echo "  build-and-push: ${{ needs.build-and-push.result }}"
+            echo "  smoke-test:     ${{ needs.smoke-test.result }}"
+            echo "  integration-test: ${{ needs.integration-test.result }}"
+            exit 1
+          fi
+          echo "All CD jobs passed."

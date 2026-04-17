@@ -1,0 +1,219 @@
+---
+# ============================================================
+# Autonomous Personnel Agent — One-command local setup
+#
+# Usage:
+#   cp .env.example .env    (fill in OPENAI_API_KEY at minimum)
+#   docker compose up -d
+#   docker compose logs -f api
+#
+# Services:
+#   postgres  → localhost:5432
+#   api       → localhost:8000  (FastAPI + Swagger UI at /docs)
+#   n8n       → localhost:5678  (n8n editor)
+#   dashboard → http://localhost:8000/dashboard (static redirect)
+#
+# Stop:  docker compose down
+# Reset: docker compose down -v  (⚠ deletes all data)
+# ============================================================
+
+name: personnel-agent
+
+services:
+
+  # ----------------------------------------------------------
+  # POSTGRES — Primary database
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: personnel-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-personnel_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      # Persistent data
+      - postgres_data:/var/lib/postgresql/data
+      # Auto-apply schema on first boot
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # Seed / migrations go here (run in alphabetical order)
+      - ./docker/postgres:/docker-entrypoint-initdb.d/extra:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent} -d ${POSTGRES_DB:-personnel_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - personnel-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # FASTAPI SERVICE — Orchestrator + 5 sub-agents
+  # ----------------------------------------------------------
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      target: production
+    container_name: personnel-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # OpenAI — required
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+      # Models
+      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-gpt-4.1}
+      AGENT_MODEL: ${AGENT_MODEL:-gpt-4.1-mini}
+      # Security
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      # Database — points to the postgres service
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-personnel_agent}
+      # n8n webhook base (for approval callbacks)
+      N8N_WEBHOOK_BASE: http://n8n:5678/webhook
+      # CORS — allow n8n and dashboard origins
+      CORS_ORIGINS: "http://localhost:5678,http://localhost:3000,http://localhost:8080"
+      # Knowledge base vectorstore (mounted below)
+      KNOWLEDGE_VECTORSTORE_PATH: /app/knowledge_index
+      # Runtime
+      ENV: ${ENV:-production}
+      PORT: "8000"
+    volumes:
+      # Persist knowledge vectorstore between restarts
+      - knowledge_index:/app/knowledge_index
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - personnel-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ----------------------------------------------------------
+  # N8N — Workflow orchestration engine
+  # ----------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: personnel-n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      # n8n basic auth (change in production)
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:?Set N8N_BASIC_AUTH_PASSWORD in .env}
+      # n8n host settings
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      # Store workflows in Postgres (persistent across container restarts)
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-personnel_agent}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-agent}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: n8n
+      # Personnel Agent API config (available as $env.* in workflows)
+      PERSONNEL_API_URL: http://api:8000
+      PERSONNEL_API_TOKEN: ${API_TOKEN}
+      SLACK_APPROVAL_CHANNEL: ${SLACK_APPROVAL_CHANNEL:-#hr-approvals}
+      SLACK_LEGAL_CHANNEL: ${SLACK_LEGAL_CHANNEL:-#legal-urgent}
+      N8N_BASE_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678}
+      # Execution settings
+      EXECUTIONS_PROCESS: main
+      EXECUTIONS_DATA_MAX_AGE: "168"         # keep 7 days of execution history
+      EXECUTIONS_DATA_PRUNE: "true"
+      N8N_METRICS: "true"
+      # Timezone
+      GENERIC_TIMEZONE: ${TZ:-Europe/London}
+      TZ: ${TZ:-Europe/London}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # Auto-import the orchestrator workflow on first boot
+      - ./docker/n8n-import:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - personnel-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ----------------------------------------------------------
+  # DASHBOARD (optional — static file server)
+  # Serve the monitoring dashboard on a dedicated port
+  # ----------------------------------------------------------
+  dashboard:
+    image: nginx:alpine
+    container_name: personnel-dashboard
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./dashboard:/usr/share/nginx/html:ro
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${DASHBOARD_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - personnel-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+# ----------------------------------------------------------
+# NETWORKS
+# ----------------------------------------------------------
+networks:
+  personnel-net:
+    driver: bridge
+    name: personnel-net
+
+# ----------------------------------------------------------
+# VOLUMES
+# ----------------------------------------------------------
+volumes:
+  postgres_data:
+    name: personnel-postgres-data
+  n8n_data:
+    name: personnel-n8n-data
+  knowledge_index:
+    name: personnel-knowledge-index

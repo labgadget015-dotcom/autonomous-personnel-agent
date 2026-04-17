@@ -1,0 +1,23 @@
+# Don't copy these into the Docker image
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+knowledge_index/
+*.faiss
+*.pkl
+*.log
+logs/
+.DS_Store
+.gitignore
+Dockerfile

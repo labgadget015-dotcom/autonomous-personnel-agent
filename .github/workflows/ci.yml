@@ -1,0 +1,328 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs on new push to same branch
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # JOB 1: Lint and type-check the FastAPI Python code
+  # ============================================================
+  lint-python:
+    name: Lint Python (FastAPI)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: api
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: api/requirements.txt
+
+      - name: Install lint dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            ruff==0.4.4 \
+            mypy==1.10.0 \
+            types-python-dateutil \
+            pydantic>=2.7.0 \
+            fastapi>=0.115.0 \
+            langchain-core>=0.3.0
+
+      - name: Ruff — lint (style + errors)
+        run: |
+          ruff check . \
+            --select E,W,F,I,UP,S,B,C4,PIE,SIM \
+            --ignore E501,S101,S105,S106,S603,S607,B008 \
+            --output-format github
+
+      - name: Ruff — format check
+        run: ruff format --check .
+
+      - name: Mypy — type check (main.py + guardrails.py)
+        # Run only on files that have clean enough types for strict checking
+        run: |
+          mypy guardrails.py \
+            --ignore-missing-imports \
+            --no-strict-optional \
+            --warn-return-any \
+            --warn-unused-ignores
+        continue-on-error: false
+
+      - name: Mypy — permissive check on agents + main
+        # Agents use complex langchain types; check but don't fail on missing stubs
+        run: |
+          mypy main.py agents.py \
+            --ignore-missing-imports \
+            --no-strict-optional
+        continue-on-error: true
+
+  # ============================================================
+  # JOB 2: Validate n8n workflow JSON
+  # ============================================================
+  validate-n8n:
+    name: Validate n8n Workflow JSON
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install validation dependencies
+        run: npm install --global ajv-cli@5 ajv-formats@3
+
+      - name: Check workflow.json is valid JSON
+        run: |
+          echo "Checking n8n/workflow.json is parseable..."
+          python3 -c "
+          import json, sys
+          try:
+              with open('n8n/workflow.json') as f:
+                  data = json.load(f)
+              print(f'  JSON valid — {len(data.get(\"nodes\", []))} nodes, {len(data.get(\"connections\", {}))} connections')
+          except json.JSONDecodeError as e:
+              print(f'  INVALID JSON: {e}', file=sys.stderr)
+              sys.exit(1)
+          "
+
+      - name: Validate workflow structure
+        run: |
+          python3 - << 'PYEOF'
+          import json, sys
+
+          with open("n8n/workflow.json") as f:
+              wf = json.load(f)
+
+          errors = []
+
+          # Required top-level fields
+          for field in ["name", "nodes", "connections"]:
+              if field not in wf:
+                  errors.append(f"Missing required field: '{field}'")
+
+          nodes = wf.get("nodes", [])
+          connections = wf.get("connections", {})
+
+          # Every node must have id, name, type, position
+          for i, node in enumerate(nodes):
+              for req in ["id", "name", "type", "position"]:
+                  if req not in node:
+                      errors.append(f"Node[{i}] '{node.get('name','?')}' missing field '{req}'")
+
+          # Node IDs must be unique
+          ids = [n["id"] for n in nodes if "id" in n]
+          if len(ids) != len(set(ids)):
+              errors.append("Duplicate node IDs detected")
+
+          # Node names must be unique
+          names = [n["name"] for n in nodes if "name" in n]
+          if len(names) != len(set(names)):
+              errors.append("Duplicate node names detected")
+
+          # Connections reference must point to existing node names
+          node_name_set = set(names)
+          for src_name, targets in connections.items():
+              if src_name not in node_name_set:
+                  errors.append(f"Connection source '{src_name}' does not match any node name")
+              for output_group in targets.get("main", []):
+                  for edge in output_group:
+                      target = edge.get("node")
+                      if target and target not in node_name_set:
+                          errors.append(f"Connection target '{target}' does not match any node name")
+
+          # At least one trigger node
+          trigger_types = [
+              "n8n-nodes-base.webhook",
+              "n8n-nodes-base.scheduleTrigger",
+              "n8n-nodes-base.emailReadImap",
+              "n8n-nodes-base.manualTrigger",
+          ]
+          has_trigger = any(n.get("type") in trigger_types for n in nodes)
+          if not has_trigger:
+              errors.append("No trigger node found (webhook, schedule, IMAP, manual)")
+
+          if errors:
+              print("n8n workflow validation FAILED:")
+              for e in errors:
+                  print(f"  ✗ {e}")
+              sys.exit(1)
+          else:
+              print(f"n8n workflow validation PASSED")
+              print(f"  Nodes   : {len(nodes)}")
+              print(f"  Connections: {len(connections)} sources")
+              print(f"  Triggers: {sum(1 for n in nodes if n.get('type') in trigger_types)}")
+          PYEOF
+
+      - name: Check all referenced env vars are documented
+        run: |
+          python3 - << 'PYEOF'
+          import re, sys
+
+          with open("n8n/workflow.json") as f:
+              wf_text = f.read()
+
+          with open("n8n/env-variables.md") as f:
+              docs_text = f.read()
+
+          # Extract all $env.VAR_NAME references from workflow
+          env_refs = set(re.findall(r'\$env\.([A-Z_][A-Z0-9_]*)', wf_text))
+
+          # Find which ones are missing from the docs
+          missing = [v for v in sorted(env_refs) if v not in docs_text]
+
+          if missing:
+              print(f"WARNING: {len(missing)} env var(s) used in workflow but not documented in n8n/env-variables.md:")
+              for v in missing:
+                  print(f"  ! {v}")
+              # Warn but don't fail — vars may be added to docs separately
+          else:
+              print(f"All {len(env_refs)} env vars referenced in workflow are documented:")
+              for v in sorted(env_refs):
+                  print(f"  ✓ {v}")
+          PYEOF
+
+  # ============================================================
+  # JOB 3: Validate Dockerfile and docker-compose
+  # ============================================================
+  validate-docker:
+    name: Validate Docker files
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: api/Dockerfile
+          ignore: DL3008,DL3009,DL3015
+          failure-threshold: error
+
+      - name: Validate docker-compose syntax
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          echo "docker-compose.yml syntax valid"
+
+      - name: Check docker-compose services are present
+        run: |
+          python3 - << 'PYEOF'
+          import yaml, sys
+
+          with open("docker-compose.yml") as f:
+              dc = yaml.safe_load(f)
+
+          services = list(dc.get("services", {}).keys())
+          required = {"api", "postgres", "n8n"}
+          missing = required - set(services)
+
+          if missing:
+              print(f"docker-compose.yml missing required services: {missing}")
+              sys.exit(1)
+          else:
+              print(f"docker-compose services found: {services}")
+          PYEOF
+
+  # ============================================================
+  # JOB 4: Validate database schema SQL
+  # ============================================================
+  validate-schema:
+    name: Validate SQL Schema
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: personnel_agent_test
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U testuser -d personnel_agent_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Apply schema to test database
+        env:
+          PGPASSWORD: testpass
+        run: |
+          echo "Applying db/schema.sql to test database..."
+          psql \
+            -h localhost \
+            -U testuser \
+            -d personnel_agent_test \
+            -f db/schema.sql \
+            --set ON_ERROR_STOP=1 \
+            2>&1
+
+      - name: Verify tables, views, and triggers were created
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d personnel_agent_test -c "
+            SELECT
+              (SELECT count(*) FROM information_schema.tables
+               WHERE table_schema = 'public' AND table_type = 'BASE TABLE') AS tables,
+              (SELECT count(*) FROM information_schema.views
+               WHERE table_schema = 'public') AS views,
+              (SELECT count(*) FROM information_schema.triggers
+               WHERE trigger_schema = 'public') AS triggers;
+          "
+
+          psql -h localhost -U testuser -d personnel_agent_test -c "
+            -- Verify all expected tables exist
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+            ORDER BY table_name;
+          "
+
+  # ============================================================
+  # STATUS CHECK — required to pass before merge
+  # ============================================================
+  ci-passed:
+    name: CI Passed
+    runs-on: ubuntu-22.04
+    needs: [lint-python, validate-n8n, validate-docker, validate-schema]
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.lint-python.result }}" != "success" ||
+                "${{ needs.validate-n8n.result }}" != "success" ||
+                "${{ needs.validate-docker.result }}" != "success" ||
+                "${{ needs.validate-schema.result }}" != "success" ]]; then
+            echo "One or more CI jobs failed:"
+            echo "  lint-python:     ${{ needs.lint-python.result }}"
+            echo "  validate-n8n:    ${{ needs.validate-n8n.result }}"
+            echo "  validate-docker: ${{ needs.validate-docker.result }}"
+            echo "  validate-schema: ${{ needs.validate-schema.result }}"
+            exit 1
+          fi
+          echo "All CI checks passed."

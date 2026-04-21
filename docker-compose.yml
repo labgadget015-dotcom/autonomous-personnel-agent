@@ -291,9 +291,11 @@ services:
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-    networks:
-      - personnel-net
-
+          volumes:
+                - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+                      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+                          networks:
+                                - personnel-net
   # ----------------------------------------------------------
   # DASHBOARD (optional — static file server)
   # Serve the monitoring dashboard on a dedicated port

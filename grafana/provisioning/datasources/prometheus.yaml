@@ -1,0 +1,15 @@
+# grafana/provisioning/datasources/prometheus.yaml
+# Auto-provisioned Prometheus datasource for autonomous-personnel-agent
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+      type: prometheus
+          access: proxy
+              url: http://localhost:9090
+                  uid: prometheus
+                      isDefault: true
+                          editable: false
+                              jsonData:
+                                    httpMethod: POST
+                                          timeInterval: "15s"
